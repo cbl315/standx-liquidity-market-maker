@@ -1,0 +1,42 @@
+# StandX 做市机器人配置文件
+
+# 链配置
+chain: bsc  # bsc | solana
+
+# StandX API
+api:
+  base_url: https://api.standx.com
+  perps_url: https://perps.standx.com
+  timeout: 30s
+
+# 做市策略配置
+strategy:
+  symbol: BTC-USD
+  order_size: 2.0        # BTC
+  spread_bps: 8          # 挂单价差 (10 bps 以内)
+
+# 风险管理配置（策略1: 立即平仓）
+risk:
+  enabled: true                          # 是否启用风险管理
+  strategy: immediate_close              # 风险策略: immediate_close
+  max_loss_per_trade: 0.002              # 单笔最大亏损 0.2%
+  daily_loss_limit: 0.01                 # 日累计亏损限制 1%
+  auto_close_position: true              # 吃单后自动平仓
+  close_timeout: 5s                      # 平仓超时时间
+
+# WebSocket 配置
+websocket:
+  market_url: wss://perps.standx.com/ws/market
+  order_url: wss://perps.standx.com/ws/order_response
+  ping_interval: 15s     # 服务器 Ping 间隔
+  reconnect_delay: 10s    # 重连延迟
+
+# 监控配置
+monitor:
+  uptime_threshold: 0.70  # 70% 在线时间目标
+  log_interval: 5m        # 状态日志间隔
+
+# 日志配置
+log:
+  level: info  # debug | info | warn | error
+  format: json # json | text

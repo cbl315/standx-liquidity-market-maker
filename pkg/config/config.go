@@ -1,0 +1,93 @@
+package config
+
+import (
+	"os"
+	"time"
+
+	"github.com/spf13/viper"
+)
+
+// Config 应用配置
+type Config struct {
+	Chain    string      `mapstructure:"chain"`
+	API      APIConfig   `mapstructure:"api"`
+	Strategy Strategy    `mapstructure:"strategy"`
+	Risk     RiskConfig  `mapstructure:"risk"`
+	WS       WSConfig    `mapstructure:"websocket"`
+	Monitor  Monitor     `mapstructure:"monitor"`
+	Log      LogConfig   `mapstructure:"log"`
+}
+
+// APIConfig API 配置
+type APIConfig struct {
+	BaseURL   string        `mapstructure:"base_url"`
+	PerpsURL  string        `mapstructure:"perps_url"`
+	Timeout   time.Duration `mapstructure:"timeout"`
+}
+
+// Strategy 做市策略配置
+type Strategy struct {
+	Symbol    string  `mapstructure:"symbol"`
+	OrderSize float64 `mapstructure:"order_size"`
+	SpreadBPS int     `mapstructure:"spread_bps"`
+}
+
+// RiskConfig 风险管理配置
+type RiskConfig struct {
+	Enabled           bool          `mapstructure:"enabled"`
+	Strategy          string        `mapstructure:"strategy"`
+	MaxLossPerTrade   float64       `mapstructure:"max_loss_per_trade"`
+	DailyLossLimit    float64       `mapstructure:"daily_loss_limit"`
+	AutoClosePosition bool          `mapstructure:"auto_close_position"`
+	CloseTimeout      time.Duration `mapstructure:"close_timeout"`
+}
+
+// WSConfig WebSocket 配置
+type WSConfig struct {
+	MarketURL      string        `mapstructure:"market_url"`
+	OrderURL       string        `mapstructure:"order_url"`
+	PingInterval   time.Duration `mapstructure:"ping_interval"`
+	ReconnectDelay time.Duration `mapstructure:"reconnect_delay"`
+}
+
+// Monitor 监控配置
+type Monitor struct {
+	UptimeThreshold float64       `mapstructure:"uptime_threshold"`
+	LogInterval     time.Duration `mapstructure:"log_interval"`
+}
+
+// LogConfig 日志配置
+type LogConfig struct {
+	Level  string `mapstructure:"level"`
+	Format string `mapstructure:"format"`
+}
+
+// Load 从文件加载配置
+func Load(configPath string) (*Config, error) {
+	v := viper.New()
+
+	// 设置配置文件
+	v.SetConfigFile(configPath)
+	v.SetConfigType("yaml")
+
+	// 读取环境变量
+	v.AutomaticEnv()
+
+	// 读取配置文件
+	if err := v.ReadInConfig(); err != nil {
+		return nil, err
+	}
+
+	var cfg Config
+	if err := v.Unmarshal(&cfg); err != nil {
+		return nil, err
+	}
+
+	// 从环境变量覆盖私钥
+	if pk := os.Getenv("WALLET_PRIVATE_KEY"); pk != "" {
+		// 私钥不存储在配置中，单独处理
+		_ = pk
+	}
+
+	return &cfg, nil
+}

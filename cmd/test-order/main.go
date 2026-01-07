@@ -147,7 +147,8 @@ func runTestOrder(cmd *cobra.Command, args []string) {
 
 	// 通过 HTTP API 查询 open 订单获取 cl_ord_id
 	fmt.Println("\n🔍 Querying open orders to get cl_ord_id...")
-	orders, err := apiClient.GetOpenOrdersByStatus(symbol, "open")
+	// 只获取 limit 类型的订单（排除 market、stop 等类型）
+	orders, err := apiClient.GetOpenOrdersByStatus(symbol, "open", "limit")
 	if err != nil {
 		slog.Error("query open orders failed", "error", err)
 		os.Exit(1)

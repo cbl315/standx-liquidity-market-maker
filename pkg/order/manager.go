@@ -250,7 +250,8 @@ func (m *Manager) cancelBidOrder(ctx context.Context) error {
 	}
 
 	// 查询当前 open 订单，找到 bid 订单的 cl_ord_id
-	orders, err := m.client.GetOpenOrdersByStatus(m.symbol, "open")
+	// 只获取 limit 类型的订单（排除 market、stop 等类型）
+	orders, err := m.client.GetOpenOrdersByStatus(m.symbol, "open", "limit")
 	if err != nil {
 		return fmt.Errorf("query open orders failed: %w", err)
 	}
@@ -292,7 +293,8 @@ func (m *Manager) cancelAskOrder(ctx context.Context) error {
 	}
 
 	// 查询当前 open 订单，找到 ask 订单的 cl_ord_id
-	orders, err := m.client.GetOpenOrdersByStatus(m.symbol, "open")
+	// 只获取 limit 类型的订单（排除 market、stop 等类型）
+	orders, err := m.client.GetOpenOrdersByStatus(m.symbol, "open", "limit")
 	if err != nil {
 		return fmt.Errorf("query open orders failed: %w", err)
 	}

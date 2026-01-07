@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -170,10 +171,26 @@ func (c *Client) GetOpenOrders(symbol ...string) ([]Order, error) {
 }
 
 // GetOpenOrdersByStatus 按状态获取订单
-func (c *Client) GetOpenOrdersByStatus(symbol, status string) ([]Order, error) {
-	url := fmt.Sprintf("%s/api/query_orders?symbol=%s&status=%s", c.baseURL, symbol, status)
+// orderType: 可选参数，过滤订单类型（如 "limit"）
+func (c *Client) GetOpenOrdersByStatus(symbol, status string, orderType ...string) ([]Order, error) {
+	// 使用 url 库构建 query parameters
+	u, err := url.Parse(c.baseURL + "/api/query_orders")
+	if err != nil {
+		return nil, err
+	}
 
-	req, err := http.NewRequest("GET", url, nil)
+	q := u.Query()
+	q.Set("symbol", symbol)
+	q.Set("status", status)
+
+	// 添加可选的 order_type 参数
+	if len(orderType) > 0 && orderType[0] != "" {
+		q.Set("order_type", orderType[0])
+	}
+
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
 		return nil, err
 	}

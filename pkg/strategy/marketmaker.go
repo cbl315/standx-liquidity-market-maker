@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"math"
+	"strconv"
 	"sync"
 
 	"github.com/cbl315/standx-liquidity-market-maker/pkg/order"
@@ -17,7 +18,7 @@ type MarketMaker struct {
 	riskMgr    *risk.Manager
 	wsClient   *ws.Client
 	symbol     string
-	orderSize  float64
+	orderQty   float64
 	spreadBPS  int
 	mu         sync.RWMutex
 	currentBid float64
@@ -31,7 +32,7 @@ func NewMarketMaker(
 	riskMgr *risk.Manager,
 	wsClient *ws.Client,
 	symbol string,
-	orderSize float64,
+	orderQty float64,
 	spreadBPS int,
 ) *MarketMaker {
 	return &MarketMaker{
@@ -39,7 +40,7 @@ func NewMarketMaker(
 		riskMgr:   riskMgr,
 		wsClient:  wsClient,
 		symbol:    symbol,
-		orderSize: orderSize,
+		orderQty:  orderQty,
 		spreadBPS: spreadBPS,
 	}
 }
@@ -52,17 +53,14 @@ func (mm *MarketMaker) Run(ctx context.Context) error {
 
 	slog.Info("market maker strategy started",
 		"symbol", mm.symbol,
-		"order_size", mm.orderSize,
+		"order_qty", mm.orderQty,
 		"spread_bps", mm.spreadBPS)
 
-	// 设置消息处理器
-	mm.wsClient.SetMessageHandler(mm)
+	// 设置价格处理器
+	mm.wsClient.SetPriceHandler(mm)
 
-	// 订阅价格和订单
+	// 订阅价格
 	if err := mm.wsClient.SubscribePrice(mm.symbol); err != nil {
-		return err
-	}
-	if err := mm.wsClient.SubscribeUserOrders(); err != nil {
 		return err
 	}
 
@@ -76,21 +74,34 @@ func (mm *MarketMaker) Run(ctx context.Context) error {
 	return nil
 }
 
-// OnPriceUpdate 处理价格更新
-func (mm *MarketMaker) OnPriceUpdate(msg ws.PriceMessage) {
+// OnPriceUpdate 处理价格更新（实现 ws.PriceHandler 接口）
+func (mm *MarketMaker) OnPriceUpdate(data ws.PriceData) {
 	slog.Debug("price update received",
-		"symbol", msg.Symbol,
-		"price", msg.Price,
-		"timestamp", msg.Timestamp)
+		"symbol", data.Symbol,
+		"mark_price", data.Data.MarkPrice,
+		"seq", data.Seq)
 
-	// 检查是否紧急停止
-	if mm.riskMgr.IsEmergencyStop() {
-		slog.Warn("emergency stop active, skipping order update")
+	// 解析标记价格
+	markPrice, err := strconv.ParseFloat(data.Data.MarkPrice, 64)
+	if err != nil {
+		slog.Error("parse mark price failed", "error", err)
+		return
+	}
+
+	// 检查余额是否足够
+	hasEnough, err := mm.riskMgr.HasSufficientBalance(mm.orderQty)
+	if err != nil {
+		slog.Error("balance check failed", "error", err)
+		return
+	}
+
+	if !hasEnough {
+		slog.Debug("insufficient balance, waiting for SL/TP to close positions")
 		return
 	}
 
 	// 计算新价格
-	newBid, newAsk := mm.calculatePrices(msg.Price)
+	newBid, newAsk := mm.calculatePrices(markPrice)
 
 	// 检查是否需要更新
 	mm.mu.RLock()
@@ -109,41 +120,9 @@ func (mm *MarketMaker) OnPriceUpdate(msg ws.PriceMessage) {
 			slog.Info("orders updated",
 				"bid", newBid,
 				"ask", newAsk,
-				"mark_price", msg.Price)
+				"mark_price", markPrice)
 		}
 	}
-}
-
-// OnOrderUpdate 处理订单更新
-func (mm *MarketMaker) OnOrderUpdate(msg ws.OrderUpdateMessage) {
-	slog.Info("order update received",
-		"order_id", msg.OrderID,
-		"status", msg.Status,
-		"filled_qty", msg.FilledQty)
-
-	// 检查订单是否成交
-	if msg.Status == "filled" {
-		slog.Warn("order filled",
-			"order_id", msg.OrderID,
-			"side", msg.Order.Side,
-			"filled_qty", msg.FilledQty)
-
-		// 触发风险管理
-		if err := mm.riskMgr.OnOrderFilled(msg.Order); err != nil {
-			slog.Error("risk management failed", "error", err)
-		}
-
-		// 恢复做市
-		mm.restoreOrders()
-	}
-}
-
-// OnPositionUpdate 处理仓位更新
-func (mm *MarketMaker) OnPositionUpdate(msg ws.PositionUpdateMessage) {
-	slog.Debug("position update received",
-		"symbol", msg.Symbol,
-		"size", msg.Size,
-		"unrealized_pnl", msg.UnrealizedPnL)
 }
 
 // calculatePrices 计算挂单价格
@@ -161,6 +140,11 @@ func (mm *MarketMaker) calculatePrices(markPrice float64) (bid, ask float64) {
 
 // shouldUpdateOrders 检查是否需要更新订单
 func (mm *MarketMaker) shouldUpdateOrders(newBid, newAsk float64) bool {
+	// 首次下单
+	if mm.currentBid == 0 || mm.currentAsk == 0 {
+		return true
+	}
+
 	// 价格变化超过 1 bps 才更新
 	const thresholdBPS = 1
 	threshold := thresholdBPS / 10000.0
@@ -169,13 +153,4 @@ func (mm *MarketMaker) shouldUpdateOrders(newBid, newAsk float64) bool {
 	askChange := math.Abs(newAsk-mm.currentAsk) / mm.currentAsk
 
 	return bidChange > threshold || askChange > threshold
-}
-
-// restoreOrders 恢复做市订单
-func (mm *MarketMaker) restoreOrders() {
-	// 获取当前市价
-	// TODO: 从缓存获取或 API 获取
-	// 然后重新下单
-
-	slog.Info("restoring market making orders after fill")
 }

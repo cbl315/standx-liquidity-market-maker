@@ -61,7 +61,7 @@ func (c *Client) NewOrder(req *NewOrderRequest) (*OrderResponse, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("new order failed: %s", string(body))
+		return nil, fmt.Errorf("new order failed: %s, %s", string(body), payload)
 	}
 
 	var result OrderResponse
@@ -69,13 +69,18 @@ func (c *Client) NewOrder(req *NewOrderRequest) (*OrderResponse, error) {
 		return nil, err
 	}
 
+	// 检查响应中的 code 字段
+	if result.Code != 0 {
+		return nil, fmt.Errorf("new order failed: code=%d, message=%s, payload=%s", result.Code, result.Message, string(payload))
+	}
+
 	return &result, nil
 }
 
-// CancelOrder 取消订单
-func (c *Client) CancelOrder(orderID string) error {
+// CancelOrder 取消订单（使用 client order ID）
+func (c *Client) CancelOrder(clOrdID string) error {
 	reqBody := map[string]string{
-		"order_id": orderID,
+		"cl_ord_id": clOrdID,
 	}
 
 	payload, err := json.Marshal(reqBody)
@@ -154,6 +159,40 @@ func (c *Client) GetOpenOrders(symbol ...string) ([]Order, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("get open orders failed: %s", string(body))
+	}
+
+	var result OpenOrdersResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	return result.Result, nil
+}
+
+// GetOpenOrdersByStatus 按状态获取订单
+func (c *Client) GetOpenOrdersByStatus(symbol, status string) ([]Order, error) {
+	url := fmt.Sprintf("%s/api/query_orders?symbol=%s&status=%s", c.baseURL, symbol, status)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get open orders by status failed: %s", string(body))
 	}
 
 	var result OpenOrdersResponse
@@ -247,6 +286,55 @@ func (c *Client) GetMarkPrice(symbol string) (float64, error) {
 	return strconv.ParseFloat(priceInfo.MarkPrice, 64)
 }
 
+// BalanceResponse 账户余额响应
+type BalanceResponse struct {
+	IsolatedBalance string `json:"isolated_balance"`
+	IsolatedUPNL    string `json:"isolated_upnl"`
+	CrossBalance    string `json:"cross_balance"`
+	CrossMargin     string `json:"cross_margin"`
+	CrossUPNL       string `json:"cross_upnl"`
+	Locked          string `json:"locked"`
+	CrossAvailable  string `json:"cross_available"`
+	Balance         string `json:"balance"`
+	UPNL            string `json:"upnl"`
+	Equity          string `json:"equity"`
+	PNLFreeze       string `json:"pnl_freeze"`
+}
+
+// GetBalance 获取账户余额
+func (c *Client) GetBalance() (*BalanceResponse, error) {
+	url := c.baseURL + "/api/query_balance"
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get balance failed: %s", string(body))
+	}
+
+	var result BalanceResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
 // doRequest 执行 HTTP 请求
 func (c *Client) doRequest(method, path string, body []byte, signatures map[string]string) (*http.Response, error) {
 	url := c.baseURL + path
@@ -268,9 +356,9 @@ func (c *Client) doRequest(method, path string, body []byte, signatures map[stri
 	return c.httpClient.Do(req)
 }
 
-// FormatPrice 格式化价格
+// FormatPrice 格式化价格（保留两位小数）
 func FormatPrice(price float64) string {
-	return strconv.FormatFloat(price, 'f', -1, 64)
+	return strconv.FormatFloat(price, 'f', 2, 64)
 }
 
 // FormatQty 格式化数量

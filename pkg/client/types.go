@@ -32,8 +32,11 @@ type NewOrderRequest struct {
 	OrderType   OrderType   `json:"order_type"`
 	Qty         string      `json:"qty"`
 	Price       string      `json:"price,omitempty"`
+	SlPrice     string      `json:"sl_price,omitempty"` // 止损价格
+	TpPrice     string      `json:"tp_price,omitempty"` // 止盈价格
 	TimeInForce TimeInForce `json:"time_in_force"`
 	ReduceOnly  bool        `json:"reduce_only"`
+	ClOrdID     string      `json:"cl_ord_id,omitempty"` // Client order ID
 }
 
 // Order 订单 (根据 API 文档更新)
@@ -60,9 +63,17 @@ type Order struct {
 
 // OrderResponse 下单响应
 type OrderResponse struct {
-	Code      int    `json:"code"`
-	Message   string `json:"message"`
+	Code     int    `json:"code"`
+	Message  string `json:"message"`
+	Data     struct {
+		OrderID string `json:"order_id"`
+	} `json:"data"`
 	RequestID string `json:"request_id"`
+}
+
+// OrderID returns the order ID from response
+func (r *OrderResponse) OrderID() string {
+	return r.Data.OrderID
 }
 
 // OpenOrdersResponse 开放订单响应

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/cbl315/standx-liquidity-market-maker/pkg/auth"
 	"github.com/cbl315/standx-liquidity-market-maker/pkg/client"
@@ -30,8 +31,9 @@ func main() {
 	slog.Info("starting StandX market maker",
 		"chain", cfg.Chain,
 		"symbol", cfg.Strategy.Symbol,
-		"order_size", cfg.Strategy.OrderSize,
-		"spread_bps", cfg.Strategy.SpreadBPS)
+		"order_qty", cfg.Strategy.OrderQty,
+		"spread_bps", cfg.Strategy.SpreadBPS,
+		"sl_tp_bps", cfg.Risk.SlTpBPS)
 
 	// 获取钱包私钥
 	privateKey := os.Getenv("WALLET_PRIVATE_KEY")
@@ -72,37 +74,62 @@ func main() {
 	apiClient.SetToken(loginResp.Token)
 
 	// 创建 WebSocket 客户端
-	wsClient := ws.NewClient(cfg.WS.MarketURL)
-	if err := wsClient.Connect(loginResp.Token); err != nil {
+	wsClient := ws.NewClient(cfg.WS.URL)
+
+	if err := wsClient.Connect(); err != nil {
 		slog.Error("websocket connect failed", "error", err)
 		os.Exit(1)
 	}
 	defer wsClient.Close()
 
-	// 订阅频道
-	if err := wsClient.Login(); err != nil {
-		slog.Error("websocket login failed", "error", err)
+	// 启动 WebSocket 重连监控
+	go func() {
+		for range wsClient.ReconnectChan() {
+			slog.Warn("websocket disconnected, reconnecting...")
+			reconnectDelay := cfg.WS.ReconnectDelay
+			if reconnectDelay == 0 {
+				reconnectDelay = 5 * time.Second
+			}
+			for {
+				if err := wsClient.Connect(); err != nil {
+					slog.Error("websocket reconnect failed, retrying...", "error", err, "retry_after", reconnectDelay)
+					time.Sleep(reconnectDelay)
+					continue
+				}
+				// 重新订阅价格
+				if err := wsClient.SubscribePrice(cfg.Strategy.Symbol); err != nil {
+					slog.Error("subscribe price after reconnect failed", "error", err)
+					time.Sleep(reconnectDelay)
+					continue
+				}
+				slog.Info("websocket reconnected successfully")
+				break
+			}
+		}
+	}()
+
+	// 订阅价格
+	if err := wsClient.SubscribePrice(cfg.Strategy.Symbol); err != nil {
+		slog.Error("subscribe price failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("subscribed to price updates", "symbol", cfg.Strategy.Symbol)
 
-	// 创建订单管理器
+	// 创建订单管理器（带 SL/TP）
 	orderMgr := order.NewManager(
 		apiClient,
 		cfg.Strategy.Symbol,
-		cfg.Strategy.OrderSize,
+		cfg.Strategy.OrderQty,
+		cfg.Risk.SlTpBPS,
 	)
 
-	// 创建风险管理器
+	// 创建风险管理器（简化版 - 只检查余额）
 	riskMgr := risk.NewManager(
 		apiClient,
-		cfg.Strategy.Symbol,
 		risk.RiskConfig{
-			Enabled:           cfg.Risk.Enabled,
-			Strategy:          cfg.Risk.Strategy,
-			MaxLossPerTrade:   cfg.Risk.MaxLossPerTrade,
-			DailyLossLimit:    cfg.Risk.DailyLossLimit,
-			AutoClosePosition: cfg.Risk.AutoClosePosition,
-			CloseTimeout:      cfg.Risk.CloseTimeout,
+			Enabled:         cfg.Risk.Enabled,
+			SlTpBPS:         cfg.Risk.SlTpBPS,
+			MinBalanceRatio: cfg.Risk.MinBalanceRatio,
 		},
 	)
 
@@ -112,7 +139,7 @@ func main() {
 		riskMgr,
 		wsClient,
 		cfg.Strategy.Symbol,
-		cfg.Strategy.OrderSize,
+		cfg.Strategy.OrderQty,
 		cfg.Strategy.SpreadBPS,
 	)
 

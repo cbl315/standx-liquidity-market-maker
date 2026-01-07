@@ -5,59 +5,52 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-// MessageHandler 消息处理器接口
-type MessageHandler interface {
-	OnPriceUpdate(msg PriceMessage)
-	OnOrderUpdate(msg OrderUpdateMessage)
-	OnPositionUpdate(msg PositionUpdateMessage)
-	OnLoginSuccess()
-	OnError(code int, message string)
+// PriceHandler 价格处理器接口
+type PriceHandler interface {
+	OnPriceUpdate(data PriceData)
+}
+
+// OrderHandler 订单处理器接口
+type OrderHandler interface {
+	OnOrderUpdate(data OrderDetail)
 }
 
 // Client WebSocket 客户端
 type Client struct {
 	conn         *websocket.Conn
 	url          string
-	token        string
-	handler      MessageHandler
+	priceHandler PriceHandler
+	orderHandler OrderHandler
 	ctx          context.Context
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
 	mu           sync.Mutex
 	connected    bool
 	dialer       *websocket.Dialer
-	lastPingTime int64
+	reconnectCh  chan struct{}
+	token        string // JWT token
 }
 
 // NewClient 创建 WebSocket 客户端
 func NewClient(url string) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Client{
-		url:    url,
-		ctx:    ctx,
-		cancel: cancel,
-		dialer: websocket.DefaultDialer,
+		url:         url,
+		ctx:         ctx,
+		cancel:      cancel,
+		dialer:      websocket.DefaultDialer,
+		reconnectCh: make(chan struct{}, 1),
 	}
 }
 
 // Connect 连接 WebSocket
-func (c *Client) Connect(token string) error {
-	c.mu.Lock()
-	c.token = token
-	c.mu.Unlock()
-
-	return c.connect()
-}
-
-// connect 内部连接方法
-func (c *Client) connect() error {
+func (c *Client) Connect() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -70,9 +63,10 @@ func (c *Client) connect() error {
 		return fmt.Errorf("websocket dial failed: %w", err)
 	}
 
-	// 设置 Ping 处理器
+	// 设置 Ping 处理器（服务器每 10s 发送 Ping）
 	conn.SetPingHandler(func(appData string) error {
 		slog.Debug("received ping from server")
+		// 自动回复 Pong（大多数 WebSocket 库会自动处理）
 		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second*10))
 	})
 
@@ -89,23 +83,33 @@ func (c *Client) connect() error {
 	c.wg.Add(1)
 	go c.readMessages()
 
-	// 启动心跳 (每 10 秒发送一次 ping)
-	c.wg.Add(1)
-	go c.heartbeat()
-
 	slog.Info("websocket connected", "url", c.url)
 
 	return nil
 }
 
-// SetMessageHandler 设置消息处理器
-func (c *Client) SetMessageHandler(handler MessageHandler) {
+// SetPriceHandler 设置价格处理器
+func (c *Client) SetPriceHandler(handler PriceHandler) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.handler = handler
+	c.priceHandler = handler
 }
 
-// SubscribePrice 订阅价格 (public channel)
+// SetOrderHandler 设置订单处理器
+func (c *Client) SetOrderHandler(handler OrderHandler) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.orderHandler = handler
+}
+
+// SetToken 设置 JWT token（用于订阅 order channel）
+func (c *Client) SetToken(token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.token = token
+}
+
+// SubscribePrice 订阅价格
 func (c *Client) SubscribePrice(symbol string) error {
 	req := SubscribeRequest{
 		Subscribe: SubscribeParams{
@@ -116,67 +120,30 @@ func (c *Client) SubscribePrice(symbol string) error {
 	return c.sendMessage(req)
 }
 
-// SubscribeUserOrders 订阅用户订单 (authenticated channel)
-func (c *Client) SubscribeUserOrders() error {
-	req := SubscribeRequest{
-		Subscribe: SubscribeParams{
-			Channel: "order",
-		},
-	}
-	return c.sendMessage(req)
-}
-
-// SubscribeUserPositions 订阅用户仓位 (authenticated channel)
-func (c *Client) SubscribeUserPositions() error {
-	req := SubscribeRequest{
-		Subscribe: SubscribeParams{
-			Channel: "position",
-		},
-	}
-	return c.sendMessage(req)
-}
-
-// SubscribeUserBalance 订阅用户余额 (authenticated channel)
-func (c *Client) SubscribeUserBalance() error {
-	req := SubscribeRequest{
-		Subscribe: SubscribeParams{
-			Channel: "balance",
-		},
-	}
-	return c.sendMessage(req)
-}
-
-// SubscribePublicTrades 订阅公开成交 (public channel)
-func (c *Client) SubscribePublicTrades(symbol string) error {
-	req := SubscribeRequest{
-		Subscribe: SubscribeParams{
-			Channel: "public_trade",
-			Symbol:  symbol,
-		},
-	}
-	return c.sendMessage(req)
-}
-
-// SubscribeDepthBook 订阅深度行情 (public channel)
-func (c *Client) SubscribeDepthBook(symbol string) error {
-	req := SubscribeRequest{
-		Subscribe: SubscribeParams{
-			Channel: "depth_book",
-			Symbol:  symbol,
-		},
-	}
-	return c.sendMessage(req)
-}
-
-// Login 登录 WebSocket
-func (c *Client) Login() error {
+// AuthOrderChannel 认证订单 channel（使用 JWT token）
+func (c *Client) AuthOrderChannel() error {
 	c.mu.Lock()
 	token := c.token
 	c.mu.Unlock()
 
-	req := LoginRequest{
-		Login: LoginParams{
-			Token: token,
+	if token == "" {
+		return fmt.Errorf("jwt token not set, call SetToken first")
+	}
+
+	req := AuthRequest{
+		Auth: AuthParams{
+			Token:   token,
+			Streams: []StreamSpec{{Channel: "order"}},
+		},
+	}
+	return c.sendMessage(req)
+}
+
+// SubscribeOrder 订阅订单（需要先认证）
+func (c *Client) SubscribeOrder() error {
+	req := SubscribeRequest{
+		Subscribe: SubscribeParams{
+			Channel: "order",
 		},
 	}
 	return c.sendMessage(req)
@@ -196,7 +163,7 @@ func (c *Client) sendMessage(msg interface{}) error {
 		return err
 	}
 
-	slog.Info("sending websocket message", "raw", string(msgJSON))
+	slog.Debug("sending websocket message", "message", string(msgJSON))
 
 	if err := c.conn.WriteMessage(websocket.TextMessage, msgJSON); err != nil {
 		return fmt.Errorf("send message failed: %w", err)
@@ -214,10 +181,12 @@ func (c *Client) readMessages() {
 		case <-c.ctx.Done():
 			return
 		default:
+			// 60 秒读取超时
 			c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 			messageType, msgJSON, err := c.conn.ReadMessage()
 			if err != nil {
 				slog.Error("websocket receive failed", "error", err)
+				c.triggerReconnect()
 				return
 			}
 
@@ -231,10 +200,30 @@ func (c *Client) readMessages() {
 	}
 }
 
+// triggerReconnect 触发重连
+func (c *Client) triggerReconnect() {
+	c.mu.Lock()
+	c.connected = false
+	if c.conn != nil {
+		c.conn.Close()
+		c.conn = nil
+	}
+	c.mu.Unlock()
+
+	select {
+	case c.reconnectCh <- struct{}{}:
+	default:
+	}
+}
+
+// ReconnectChan 获取重连通道
+func (c *Client) ReconnectChan() <-chan struct{} {
+	return c.reconnectCh
+}
+
 // handleMessage 处理消息
 func (c *Client) handleMessage(msgJSON []byte) {
-	// 记录原始消息 (调试用)
-	slog.Info("received message", "raw", string(msgJSON))
+	slog.Debug("received message", "raw", string(msgJSON))
 
 	var msg map[string]interface{}
 	if err := json.Unmarshal(msgJSON, &msg); err != nil {
@@ -242,97 +231,60 @@ func (c *Client) handleMessage(msgJSON []byte) {
 		return
 	}
 
-	// 检查是否为响应消息 (有 code 和 message 字段)
-	if code, ok := msg["code"].(float64); ok {
-		method, _ := msg["method"].(string)
-		message, _ := msg["message"].(string)
-
-		slog.Info("received response", "method", method, "code", int(code), "message", message)
-
-		if method == "login" && int(code) == 0 {
-			slog.Info("login successful")
-			if c.handler != nil {
-				c.handler.OnLoginSuccess()
-			}
-		} else if int(code) != 0 && c.handler != nil {
-			c.handler.OnError(int(code), message)
-		}
-		return
-	}
-
 	// 处理频道推送消息
 	channel, _ := msg["channel"].(string)
 	if channel == "" {
-		slog.Warn("message without channel", "message", string(msgJSON))
+		slog.Warn("message without channel")
 		return
 	}
 
-	slog.Info("channel message", "channel", channel)
-
 	switch channel {
 	case "price":
-		var channelMsg ChannelMessage
-		if err := json.Unmarshal(msgJSON, &channelMsg); err != nil {
-			slog.Error("unmarshal price channel message failed", "error", err)
-			return
-		}
 		var priceData PriceData
-		if err := json.Unmarshal(channelMsg.Data, &priceData); err != nil {
+		if err := json.Unmarshal(msgJSON, &priceData); err != nil {
 			slog.Error("unmarshal price data failed", "error", err)
 			return
 		}
-		// 解析价格
-		price, _ := strconv.ParseFloat(priceData.LastPrice, 64)
-		priceMsg := PriceMessage{
-			Symbol:    priceData.Symbol,
-			Price:     price,
-			Timestamp: time.Now().UnixMilli(),
-		}
-		if c.handler != nil {
-			c.handler.OnPriceUpdate(priceMsg)
+
+		c.mu.Lock()
+		handler := c.priceHandler
+		c.mu.Unlock()
+
+		if handler != nil {
+			handler.OnPriceUpdate(priceData)
 		}
 
 	case "order":
-		var channelMsg ChannelMessage
-		if err := json.Unmarshal(msgJSON, &channelMsg); err != nil {
-			slog.Error("unmarshal order channel message failed", "error", err)
-			return
-		}
-		var orderMsg OrderUpdateMessage
-		if err := json.Unmarshal(channelMsg.Data, &orderMsg); err != nil {
+		var orderData OrderData
+		if err := json.Unmarshal(msgJSON, &orderData); err != nil {
 			slog.Error("unmarshal order data failed", "error", err)
 			return
 		}
-		if c.handler != nil {
-			c.handler.OnOrderUpdate(orderMsg)
+
+		c.mu.Lock()
+		handler := c.orderHandler
+		c.mu.Unlock()
+
+		if handler != nil {
+			handler.OnOrderUpdate(orderData.Data)
 		}
 
-	case "position":
-		var channelMsg ChannelMessage
-		if err := json.Unmarshal(msgJSON, &channelMsg); err != nil {
-			slog.Error("unmarshal position channel message failed", "error", err)
+	case "auth":
+		var authResp AuthResponse
+		if err := json.Unmarshal(msgJSON, &authResp); err != nil {
+			slog.Error("unmarshal auth response failed", "error", err)
 			return
 		}
-		var posMsg PositionUpdateMessage
-		if err := json.Unmarshal(channelMsg.Data, &posMsg); err != nil {
-			slog.Error("unmarshal position data failed", "error", err)
-			return
+		if authResp.Data.Code == 0 {
+			slog.Info("websocket order channel auth successful")
+		} else {
+			slog.Error("websocket order channel auth failed",
+				"code", authResp.Data.Code,
+				"msg", authResp.Data.Msg)
 		}
-		if c.handler != nil {
-			c.handler.OnPositionUpdate(posMsg)
-		}
-
-	case "balance":
-		var balanceMsg BalanceUpdateMessage
-		dataJSON, _ := json.Marshal(msg["data"])
-		if err := json.Unmarshal(dataJSON, &balanceMsg); err != nil {
-			slog.Error("unmarshal balance data failed", "error", err)
-			return
-		}
-		slog.Info("balance update", "currency", balanceMsg.Currency, "balance", balanceMsg.Balance)
 
 	default:
-		slog.Debug("unknown channel", "channel", channel)
+		slog.Debug("unhandled channel", "channel", channel)
 	}
 }
 
@@ -348,8 +300,15 @@ func (c *Client) Close() error {
 		if err := c.conn.Close(); err != nil {
 			return err
 		}
-		c.connected = false
 	}
+	c.connected = false
 
 	return nil
+}
+
+// IsConnected 检查是否已连接
+func (c *Client) IsConnected() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.connected
 }

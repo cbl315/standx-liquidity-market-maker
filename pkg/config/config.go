@@ -28,25 +28,23 @@ type APIConfig struct {
 // Strategy 做市策略配置
 type Strategy struct {
 	Symbol    string  `mapstructure:"symbol"`
-	OrderSize float64 `mapstructure:"order_size"`
+	OrderQty  float64 `mapstructure:"order_qty"`
 	SpreadBPS int     `mapstructure:"spread_bps"`
 }
 
 // RiskConfig 风险管理配置
 type RiskConfig struct {
-	Enabled           bool          `mapstructure:"enabled"`
-	Strategy          string        `mapstructure:"strategy"`
-	MaxLossPerTrade   float64       `mapstructure:"max_loss_per_trade"`
-	DailyLossLimit    float64       `mapstructure:"daily_loss_limit"`
-	AutoClosePosition bool          `mapstructure:"auto_close_position"`
-	CloseTimeout      time.Duration `mapstructure:"close_timeout"`
+	Enabled          bool          `mapstructure:"enabled"`
+	SlTpBPS          int           `mapstructure:"sl_tp_bps"`
+	MinBalanceRatio  float64       `mapstructure:"min_balance_ratio"`
+	CheckInterval    time.Duration `mapstructure:"check_interval"`
 }
 
 // WSConfig WebSocket 配置
 type WSConfig struct {
-	MarketURL      string        `mapstructure:"market_url"`
-	OrderURL       string        `mapstructure:"order_url"`
+	URL            string        `mapstructure:"url"`
 	PingInterval   time.Duration `mapstructure:"ping_interval"`
+	PongTimeout    time.Duration `mapstructure:"pong_timeout"`
 	ReconnectDelay time.Duration `mapstructure:"reconnect_delay"`
 }
 

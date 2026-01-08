@@ -352,6 +352,49 @@ func (c *Client) GetBalance() (*BalanceResponse, error) {
 	return &result, nil
 }
 
+// GetTrades 获取成交记录
+func (c *Client) GetTrades(symbol, start, end string) (*TradesResponse, error) {
+	u, err := url.Parse(c.baseURL + "/api/query_trades")
+	if err != nil {
+		return nil, err
+	}
+
+	q := u.Query()
+	q.Set("symbol", symbol)
+	q.Set("start", start)
+	q.Set("end", end)
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequest("GET", u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get trades failed: %s", string(body))
+	}
+
+	var result TradesResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
 // doRequest 执行 HTTP 请求
 func (c *Client) doRequest(method, path string, body []byte, signatures map[string]string) (*http.Response, error) {
 	url := c.baseURL + path

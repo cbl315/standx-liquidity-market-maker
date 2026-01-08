@@ -116,3 +116,27 @@ type SymbolPriceInfo struct {
 	SpreadAsk   string `json:"spread_ask"`
 	Time        string `json:"time"`
 }
+
+// Trade 成交记录
+type Trade struct {
+	ID        int    `json:"id"`
+	OrderID   int    `json:"order_id"`
+	User      string `json:"user"`
+	Symbol    string `json:"symbol"`
+	Side      string `json:"side"`
+	Price     string `json:"price"`
+	Qty       string `json:"qty"`
+	Value     string `json:"value"`
+	FeeAsset  string `json:"fee_asset"`
+	FeeQty    string `json:"fee_qty"`
+	PNL       string `json:"pnl"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// TradesResponse 成交记录响应
+type TradesResponse struct {
+	PageSize int     `json:"page_size"`
+	Result   []Trade `json:"result"`
+	Total    int     `json:"total"`
+}

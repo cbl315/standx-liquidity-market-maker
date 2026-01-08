@@ -1064,6 +1064,417 @@ func (c *Client) doRequest(method, path string, body []byte, signatures map[stri
 
 ---
 
+### 6. 定期平仓检查
+
+**目标**: 定期检查用户的 position（而不是 open order），如果存在 position，则取消所有订单，然后市价平仓，等待重新开单
+
+**问题**: 异常情况下（如网络中断、程序崩溃、SL/TP 失效），position 可能无法正常平仓，导致仓位暴露风险
+
+**实现方案**:
+```go
+type PositionCleaner struct {
+    client      *client.Client
+    symbol      string
+    interval    time.Duration  // 检查间隔（30 秒）
+    stopCh      chan struct{}
+}
+
+func (pc *PositionCleaner) Start() {
+    ticker := time.NewTicker(pc.interval)
+    defer ticker.Stop()
+
+    for {
+        select {
+        case <-ticker.C:
+            pc.checkAndClosePositions()
+        case <-pc.stopCh:
+            return
+        }
+    }
+}
+
+func (pc *PositionCleaner) checkAndClosePositions() {
+    // 查询当前 position
+    pos, err := pc.client.GetPosition(pc.symbol)
+    if err != nil {
+        slog.Error("query position failed", "error", err)
+        return
+    }
+
+    // 检查是否有未平仓位
+    size, _ := strconv.ParseFloat(pos.Size, 64)
+    if size == 0 {
+        // 没有仓位，正常
+        return
+    }
+
+    slog.Warn("detected open position, canceling all orders and closing position",
+        "size", size,
+        "side", pos.Side,
+        "entry_price", pos.EntryPrice)
+
+    // 1. 取消所有订单（避免新的订单成交）
+    if err := pc.cancelAllOrders(); err != nil {
+        slog.Error("cancel all orders failed", "error", err)
+        return
+    }
+
+    // 2. 市价平仓
+    closeReq := &client.NewOrderRequest{
+        Symbol:      pc.symbol,
+        Side:        getCloseSide(size),  // 根据仓位正负决定平仓方向
+        OrderType:   client.OrderTypeMarket,
+        Qty:         formatQty(math.Abs(size)),
+        TimeInForce: client.TimeInForceIOC,
+        ReduceOnly:  true,  // 只平仓
+    }
+
+    if _, err := pc.client.NewOrder(closeReq); err != nil {
+        slog.Error("close position with market price failed", "error", err)
+    } else {
+        slog.Info("position closed with market price, waiting to resume market making",
+            "closed_size", size)
+    }
+}
+
+func (pc *PositionCleaner) cancelAllOrders() error {
+    // 查询所有 open 订单
+    orders, err := pc.client.GetOpenOrdersByStatus(pc.symbol, "new")
+    if err != nil {
+        return err
+    }
+
+    // 批量取消
+    for _, ord := range orders {
+        if err := pc.client.CancelOrder(ord.ClOrdID); err != nil {
+            slog.Error("cancel order failed", "cl_ord_id", ord.ClOrdID, "error", err)
+        }
+    }
+
+    return nil
+}
+
+func (pc *PositionCleaner) Stop() {
+    close(pc.stopCh)
+}
+
+// 根据仓位正负决定平仓方向
+// size > 0 (多头) -> 需要卖出平仓 -> "ask"
+// size < 0 (空头) -> 需要买入平仓 -> "bid"
+func getCloseSide(size float64) string {
+    if size > 0 {
+        return "ask"  // 平多头：卖出
+    }
+    return "bid"  // 平空头：买入
+}
+```
+
+**配置示例**:
+```yaml
+position_cleaner:
+  enabled: true          # 是否启用
+  interval: 30s          # 检查间隔
+```
+
+**集成位置**:
+- 新建 `pkg/position/cleaner.go`
+- `cmd/main.go` - 启动时启动 cleaner goroutine，退出时停止
+
+**逻辑说明**:
+```
+1. 每 30 秒检查一次 position（不是 open order）
+2. 如果 position.size != 0（有未平仓位）：
+   a. 取消所有 open orders（防止新的订单成交）
+   b. 使用市价单平仓（reduce_only=true）
+   c. 等待下次价格更新时重新开单
+3. 记录日志便于追踪
+```
+
+**关键变化**:
+- ✅ 检查 position 而不是 open order
+- ✅ 先取消所有订单，再平仓（避免平仓期间新单成交）
+- ✅ 平仓后等待下次价格更新自动恢复做市
+
+---
+
+**竞态条件 (Race Condition) 风险与解决方案**:
+
+实现此功能时需要注意以下竞态条件场景：
+
+**场景 1: Position Cleaner 自身重入**
+```
+时刻 T0: 第一次检查发现 position = 1 BTC
+时刻 T1: 开始取消订单
+时刻 T2: 平仓请求发送中（网络延迟）
+时刻 T3: 第二次检查（30s后）→ 仍然看到 position = 1 BTC（API 延迟）
+时刻 T4: 又发起新的取消 + 平仓请求 ❌
+```
+
+**场景 2: Position Cleaner 与主做市循环**
+```
+时刻 T0: Position Cleaner 检测到仓位，开始取消订单
+时刻 T1: WebSocket 收到价格更新
+时刻 T2: 主循环调用 UpdateOrders() → 创建新订单
+时刻 T3: Position Cleaner 发送平仓请求
+时刻 T4: 新订单又被吃掉，仓位增加 ❌
+```
+
+**场景 3: 检查 Position 与 SL/TP 触发**
+```
+时刻 T0: 检查 position = 1 BTC
+时刻 T1: SL/TP 触发，平仓成功
+时刻 T2: Position Cleaner 取消所有订单（此时已无仓位）
+时刻 T3: Position Cleaner 发送平仓请求（reduce_only=true，但仓位为0）
+```
+
+**解决方案（使用 CAS 原子操作）**:
+
+```go
+import "sync/atomic"
+
+type PositionCleaner struct {
+    client      *client.Client
+    symbol      string
+    interval    time.Duration
+    stopCh      chan struct{}
+
+    // 使用 atomic 操作防止竞态
+    isClosing   int32         // 0 = false, 1 = true
+    lastCloseAt time.Time     // 上次平仓完成时间
+}
+
+func (pc *PositionCleaner) checkAndClosePositions() {
+    // CAS 操作: 尝试将 isClosing 从 0 设置为 1
+    // 如果失败，说明其他 goroutine 正在平仓，直接返回
+    if !atomic.CompareAndSwapInt32(&pc.isClosing, 0, 1) {
+        slog.Debug("already closing position, skip this check")
+        return
+    }
+    defer atomic.StoreInt32(&pc.isClosing, 0)  // 完成后清除标记
+
+    // 查询当前 position
+    pos, err := pc.client.GetPosition(pc.symbol)
+    if err != nil {
+        slog.Error("query position failed", "error", err)
+        return
+    }
+
+    // 检查是否有未平仓位
+    size, _ := strconv.ParseFloat(pos.Size, 64)
+    if size == 0 {
+        return
+    }
+
+    slog.Warn("detected open position, canceling all orders and closing position",
+        "size", size)
+
+    // 1. 取消所有订单
+    if err := pc.cancelAllOrders(); err != nil {
+        slog.Error("cancel all orders failed", "error", err)
+    }
+
+    // 2. 市价平仓
+    closeReq := &client.NewOrderRequest{
+        Symbol:      pc.symbol,
+        Side:        getCloseSide(size),
+        OrderType:   client.OrderTypeMarket,
+        Qty:         formatQty(math.Abs(size)),
+        TimeInForce: client.TimeInForceIOC,
+        ReduceOnly:  true,
+    }
+
+    if _, err := pc.client.NewOrder(closeReq); err != nil {
+        slog.Error("close position failed", "error", err)
+    } else {
+        slog.Info("position closed", "size", size)
+    }
+}
+
+// 提供给主循环调用，检查是否正在平仓
+func (pc *PositionCleaner) IsClosing() bool {
+    return atomic.LoadInt32(&pc.isClosing) == 1
+}
+```
+
+**主循环集成**:
+
+```go
+func (mm *MarketMaker) OnPriceUpdate(data ws.PriceData) {
+    // 检查是否正在平仓，如果是则跳过本次更新
+    if mm.positionCleaner.IsClosing() {
+        slog.Debug("position cleaner is closing, skip order update")
+        return
+    }
+
+    // 正常做市逻辑
+    newBid, newAsk := mm.calculatePrices(markPrice)
+    if err := mm.orderMgr.UpdateOrders(newBid, newAsk); err != nil {
+        slog.Error("update orders failed", "error", err)
+    }
+}
+```
+
+**CAS (Compare-And-Swap) 说明**:
+
+CAS 是一种原子操作，包含三个参数：
+- **内存值 (V)**: 当前内存中的值
+- **预期旧值 (A)**: 认为应该是的值
+- **新值 (B)**: 想要设置的新值
+
+操作逻辑：如果内存值 V 等于预期值 A，则将 V 更新为 B，否则不做任何操作。整个过程是原子的。
+
+```go
+// 尝试将 isClosing 从 0 设置为 1
+swapped := atomic.CompareAndSwapInt32(&pc.isClosing, 0, 1)
+// 如果 swapped == true，成功设置
+// 如果 swapped == false，说明当前值不是 0（已经在平仓中）
+```
+
+**额外优化建议**:
+
+1. **增加冷却时间**: 平仓后等待 5-10 秒再允许下次检查
+2. **添加超时机制**: 如果平仓超过 1 分钟未完成，强制重置 `isClosing`
+3. **使用 Mutex 替代 CAS**: 如果临界区逻辑复杂，Mutex 更直观
+
+**优先级**: **高** - 风险控制必需
+
+---
+
+### 7. 吃单后暂停开单
+
+**目标**: 当限价单被吃单（成交）后，暂停开新的限价单，等待止盈/止损触发或手动平仓后恢复
+
+**问题**: 当前实现在订单成交后会继续开新单，导致仓位累积，增加风险
+
+**场景分析**:
+```
+正常情况:
+1. bid 单被吃 → 持有多头仓位
+2. 此时继续开新 bid/ask 单 → 仓位可能累积到 2 BTC、3 BTC...
+3. 如果价格继续波动，风险敞口越来越大
+
+期望行为:
+1. bid 单被吃 → 持有多头仓位
+2. 暂停开新单，等待 SL/TP 触发
+3. TP/SL 触发后仓位清零 → 恢复做市
+```
+
+**实现方案**:
+```go
+type PositionState struct {
+    hasPosition bool    // 是否持有仓位
+    positionQty float64 // 当前仓位数量
+    side        string  // "long" | "short"
+    lastFillAt  time.Time
+    mu          sync.RWMutex
+}
+
+func (ps *PositionState) HasOpenPosition() bool {
+    ps.mu.RLock()
+    defer ps.mu.RUnlock()
+    return ps.hasPosition
+}
+
+func (ps *PositionState) MarkFilled(qty float64, side string) {
+    ps.mu.Lock()
+    defer ps.mu.Unlock()
+    ps.hasPosition = true
+    ps.positionQty = qty
+    ps.side = side
+    ps.lastFillAt = time.Now()
+    slog.Warn("order filled, pausing new orders",
+        "qty", qty,
+        "side", side,
+        "waiting_for_sl_tp", "true")
+}
+
+func (ps *PositionState) MarkClosed() {
+    ps.mu.Lock()
+    defer ps.mu.Unlock()
+    if ps.hasPosition {
+        slog.Info("position closed, resuming market making",
+            "held_duration", time.Since(ps.lastFillAt))
+    }
+    ps.hasPosition = false
+    ps.positionQty = 0
+    ps.side = ""
+}
+```
+
+**策略集成**:
+```go
+// pkg/strategy/marketmaker.go
+
+func (mm *MarketMaker) OnPriceUpdate(data ws.PriceData) {
+    // 检查是否有未平仓位
+    if mm.positionState.HasOpenPosition() {
+        slog.Debug("skipping order placement: position still open",
+            "waiting_for", "sl/tp to close")
+        return
+    }
+
+    // 没有仓位，正常做市
+    newBid, newAsk := mm.calculatePrices(markPrice)
+    if err := mm.orderMgr.UpdateOrders(newBid, newAsk); err != nil {
+        slog.Error("update orders failed", "error", err)
+    }
+}
+```
+
+**检测订单成交**:
+```go
+// 方案 1: 轮询仓位（最简单）
+func (mm *MarketMaker) checkPosition() {
+    pos, err := mm.client.GetPosition(mm.symbol)
+    if err != nil {
+        return
+    }
+
+    if pos != nil && pos.Size != "0" {
+        size, _ := strconv.ParseFloat(pos.Size, 64)
+        if size > 0 {
+            mm.positionState.MarkFilled(size, "long")
+        } else {
+            mm.positionState.MarkFilled(-size, "short")
+        }
+    } else {
+        mm.positionState.MarkClosed()
+    }
+}
+
+// 方案 2: WebSocket 订单状态更新（推荐）
+func (m *Manager) OnOrderUpdate(data ws.OrderDetail) {
+    // 检测订单状态变为 filled 或 partially_filled
+    if data.Status == "filled" || data.Status == "partially_filled" {
+        fillQty, _ := strconv.ParseFloat(data.FillQty, 64)
+        if fillQty > 0 {
+            side := "long"
+            if data.Side == "sell" {
+                side = "short"
+            }
+            mm.positionState.MarkFilled(fillQty, side)
+        }
+    }
+}
+```
+
+**配置示例**:
+```yaml
+position_guard:
+  enabled: true
+  check_interval: 10s    # 仓位检查间隔
+  max_position_age: 5m   # 最大持仓时间（超时强制平仓）
+```
+
+**集成位置**:
+- `pkg/strategy/position_state.go` - 仓位状态管理
+- `pkg/strategy/marketmaker.go` - 在 `OnPriceUpdate` 中检查仓位
+- `cmd/main.go` - 启动仓位检查 goroutine
+
+**优先级**: **高** - 核心风险控制
+
+---
+
 ### 优先级建议
 
 | TODO | 优先级 | 预计工作量 | 收益 |
@@ -1073,6 +1484,8 @@ func (c *Client) doRequest(method, path string, body []byte, signatures map[stri
 | 3. API 调用优化 | 高 | 1 小时 | 减少 API 调用 50% |
 | 4. 智能撤单策略 | 中 | 3-4 小时 | 降低交易成本 |
 | 5. JWT Token 过期处理 | 高 | 2-3 小时 | 生产环境必需 |
+| 6. 定期平仓检查 | 高 | 2-3 小时 | 风险控制必需 |
+| 7. 吃单后暂停开单 | 高 | 2-3 小时 | 核心风险控制 |
 
 ## 参考文档
 

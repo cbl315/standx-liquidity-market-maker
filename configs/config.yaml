@@ -12,8 +12,8 @@ api:
 # 做市策略配置
 strategy:
   symbol: BTC-USD
-  order_qty: 0.005         # BTC
-  spread_bps: 8          # 挂单价差 (10 bps 以内)
+  order_qty: 0.004         # BTC
+  spread_bps: 19          # 挂单价差 (10 bps 以内)
 
 # 风险管理配置（SL/TP 自动平仓）
 risk:

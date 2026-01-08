@@ -14,6 +14,7 @@ import (
 	"github.com/cbl315/standx-liquidity-market-maker/pkg/order"
 	"github.com/cbl315/standx-liquidity-market-maker/pkg/risk"
 	"github.com/cbl315/standx-liquidity-market-maker/pkg/strategy"
+	"github.com/cbl315/standx-liquidity-market-maker/pkg/timewindow"
 	"github.com/cbl315/standx-liquidity-market-maker/pkg/ws"
 )
 
@@ -27,6 +28,13 @@ func main() {
 
 	// 配置日志
 	setupLogger(cfg.Log)
+
+	// 创建时间窗口过滤器
+	windowFilter, err := timewindow.NewFilter(cfg.TimeWindow)
+	if err != nil {
+		slog.Error("create time window filter failed", "error", err)
+		os.Exit(1)
+	}
 
 	slog.Info("starting StandX market maker",
 		"chain", cfg.Chain,
@@ -146,6 +154,11 @@ func main() {
 	// 创建上下文
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// 启动运行时时间窗口监控（仅当启用且action为shutdown时）
+	if cfg.TimeWindow.Enabled && cfg.TimeWindow.Action == config.WindowActionShutdown {
+		go mm.MonitorTimeWindow(ctx, windowFilter, apiClient, orderMgr)
+	}
 
 	// 启动做市策略
 	go func() {

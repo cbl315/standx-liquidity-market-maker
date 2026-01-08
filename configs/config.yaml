@@ -13,7 +13,7 @@ api:
 strategy:
   symbol: BTC-USD
   order_qty: 0.004         # BTC
-  spread_bps: 19          # 挂单价差 (10 bps 以内)
+  spread_bps: 18          # 挂单价差 (10 bps 以内)
 
 # 风险管理配置（SL/TP 自动平仓）
 risk:
@@ -33,6 +33,16 @@ websocket:
 monitor:
   uptime_threshold: 0.70  # 70% 在线时间目标
   log_interval: 5m        # 状态日志间隔
+
+# 时间窗口配置（北京时间）
+time_window:
+  enabled: true              # 是否启用时间窗口控制
+  timezone: "Asia/Shanghai"  # 时区
+  windows:                   # 禁止运行的时间窗口
+    - start: "10:00"         # 开始时间
+      end: "06:00"           # 结束时间（支持跨天）
+      weekdays: [1,2,3,4,5] # 星期一到星期五（1=周一, 7=周日）
+  action: "shutdown"         # 窗口期内操作: shutdown (停止运行) | pause (暂停下单)
 
 # 日志配置
 log:

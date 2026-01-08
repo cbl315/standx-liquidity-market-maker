@@ -2,13 +2,17 @@ package strategy
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
 	"strconv"
 	"sync"
+	"time"
 
+	"github.com/cbl315/standx-liquidity-market-maker/pkg/client"
 	"github.com/cbl315/standx-liquidity-market-maker/pkg/order"
 	"github.com/cbl315/standx-liquidity-market-maker/pkg/risk"
+	"github.com/cbl315/standx-liquidity-market-maker/pkg/timewindow"
 	"github.com/cbl315/standx-liquidity-market-maker/pkg/ws"
 )
 
@@ -24,6 +28,7 @@ type MarketMaker struct {
 	currentBid float64
 	currentAsk float64
 	isRunning  bool
+	paused     bool  // 是否已暂停（窗口期控制）
 }
 
 // NewMarketMaker 创建做市策略
@@ -76,6 +81,14 @@ func (mm *MarketMaker) Run(ctx context.Context) error {
 
 // OnPriceUpdate 处理价格更新（实现 ws.PriceHandler 接口）
 func (mm *MarketMaker) OnPriceUpdate(data ws.PriceData) {
+	// 检查是否暂停（窗口期）
+	mm.mu.RLock()
+	if mm.paused {
+		mm.mu.RUnlock()
+		return
+	}
+	mm.mu.RUnlock()
+
 	slog.Debug("price update received",
 		"symbol", data.Symbol,
 		"mark_price", data.Data.MarkPrice,
@@ -153,4 +166,149 @@ func (mm *MarketMaker) shouldUpdateOrders(newBid, newAsk float64) bool {
 	askChange := math.Abs(newAsk-mm.currentAsk) / mm.currentAsk
 
 	return bidChange > threshold || askChange > threshold
+}
+
+// Pause 暂停做市（用于窗口期控制）
+func (mm *MarketMaker) Pause() {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+
+	if mm.paused {
+		return
+	}
+
+	mm.paused = true
+	slog.Info("market maker paused (time window)")
+}
+
+// Resume 恢复做市
+func (mm *MarketMaker) Resume() {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+
+	if !mm.paused {
+		return
+	}
+
+	mm.paused = false
+	slog.Info("market maker resumed (time window ended)")
+}
+
+// IsPaused 检查是否已暂停
+func (mm *MarketMaker) IsPaused() bool {
+	mm.mu.RLock()
+	defer mm.mu.RUnlock()
+	return mm.paused
+}
+
+// monitorTimeWindow 运行时监控时间窗口（在独立 goroutine 中运行）
+func (mm *MarketMaker) MonitorTimeWindow(
+	ctx context.Context,
+	windowFilter *timewindow.Filter,
+	apiClient *client.Client,
+	orderMgr *order.Manager,
+) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	// 启动时立即检查一次当前状态
+	wasInWindow := windowFilter.IsInWindow()
+	if wasInWindow {
+		slog.Warn("started in time window, pausing market making immediately",
+			"window_end", windowFilter.GetNextWindowEnd().Format("2006-01-02 15:04:05 MST"))
+		mm.Pause()
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case <-ticker.C:
+			isInWindow := windowFilter.IsInWindow()
+
+			// 检测状态变化
+			if isInWindow && !wasInWindow {
+				// 进入窗口期
+				slog.Warn("entering time window, pausing market making",
+					"window_end", windowFilter.GetNextWindowEnd().Format("2006-01-02 15:04:05 MST"))
+
+				// 1. 暂停做市
+				mm.Pause()
+
+				// 2. 取消所有订单
+				slog.Info("canceling all orders...")
+				orders, err := apiClient.GetOpenOrders(mm.symbol)
+				if err != nil {
+					slog.Error("get open orders failed", "error", err)
+				} else {
+					for _, ord := range orders {
+						if err := apiClient.CancelOrder(ord.ClOrdID); err != nil {
+							slog.Error("cancel order failed", "cl_ord_id", ord.ClOrdID, "error", err)
+						} else {
+							slog.Info("order canceled", "cl_ord_id", ord.ClOrdID)
+						}
+					}
+				}
+
+				// 3. 平掉所有仓位
+				slog.Info("closing positions...")
+				pos, err := apiClient.GetPosition(mm.symbol)
+				if err != nil {
+					slog.Error("get position failed", "error", err)
+				} else {
+					size, err := parsePositionSize(pos.Qty)
+					if err != nil {
+						slog.Error("parse position size failed", "error", err)
+					} else if size != 0 {
+						var side client.OrderSide = client.OrderAsk
+						if size < 0 {
+							side = client.OrderBid
+						}
+						closeReq := &client.NewOrderRequest{
+							Symbol:      mm.symbol,
+							Side:        side,
+							OrderType:   client.OrderTypeMarket,
+							Qty:         formatPositionSize(abs(size)),
+							TimeInForce: client.TimeInForceIOC,
+							ReduceOnly:  true,
+						}
+						if _, err := apiClient.NewOrder(closeReq); err != nil {
+							slog.Error("close position failed", "error", err)
+						} else {
+							slog.Info("position closed", "size", size)
+						}
+					}
+				}
+
+				wasInWindow = true
+
+			} else if !isInWindow && wasInWindow {
+				// 离开窗口期，恢复做市
+				slog.Info("time window ended, resuming market making")
+				mm.Resume()
+				wasInWindow = false
+			}
+		}
+	}
+}
+
+// parsePositionSize 解析仓位大小字符串为 float64
+func parsePositionSize(qtyStr string) (float64, error) {
+	var qty float64
+	_, err := fmt.Sscanf(qtyStr, "%f", &qty)
+	return qty, err
+}
+
+// formatPositionSize 格式化仓位大小为字符串
+func formatPositionSize(size float64) string {
+	return fmt.Sprintf("%.6f", size)
+}
+
+// abs 返回浮点数的绝对值
+func abs(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }

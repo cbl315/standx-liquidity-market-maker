@@ -9,13 +9,14 @@ import (
 
 // Config 应用配置
 type Config struct {
-	Chain    string      `mapstructure:"chain"`
-	API      APIConfig   `mapstructure:"api"`
-	Strategy Strategy    `mapstructure:"strategy"`
-	Risk     RiskConfig  `mapstructure:"risk"`
-	WS       WSConfig    `mapstructure:"websocket"`
-	Monitor  Monitor     `mapstructure:"monitor"`
-	Log      LogConfig   `mapstructure:"log"`
+	Chain      string         `mapstructure:"chain"`
+	API        APIConfig      `mapstructure:"api"`
+	Strategy   Strategy       `mapstructure:"strategy"`
+	Risk       RiskConfig     `mapstructure:"risk"`
+	WS         WSConfig       `mapstructure:"websocket"`
+	Monitor    Monitor        `mapstructure:"monitor"`
+	TimeWindow TimeWindowConfig `mapstructure:"time_window"`
+	Log        LogConfig      `mapstructure:"log"`
 }
 
 // APIConfig API 配置
@@ -59,6 +60,29 @@ type LogConfig struct {
 	Level  string `mapstructure:"level"`
 	Format string `mapstructure:"format"`
 }
+
+// TimeWindowConfig 时间窗口配置
+type TimeWindowConfig struct {
+	Enabled  bool          `mapstructure:"enabled"`
+	TimeZone string        `mapstructure:"timezone"`
+	Windows  []WindowSpec  `mapstructure:"windows"`
+	Action   WindowAction  `mapstructure:"action"`
+}
+
+// WindowSpec 时间窗口定义
+type WindowSpec struct {
+	Start    string `mapstructure:"start"`    // "22:00"
+	End      string `mapstructure:"end"`      // "03:00"
+	Weekdays []int  `mapstructure:"weekdays"` // [1,2,3,4,5]
+}
+
+// WindowAction 窗口期内执行的操作
+type WindowAction string
+
+const (
+	WindowActionShutdown WindowAction = "shutdown" // 停止运行
+	WindowActionPause    WindowAction = "pause"    // 暂停下单
+)
 
 // Load 从文件加载配置
 func Load(configPath string) (*Config, error) {

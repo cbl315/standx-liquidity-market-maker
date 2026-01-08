@@ -825,45 +825,79 @@ WantedBy=multi-user.target
 
 | 阶段 | 任务 | 状态 |
 |------|------|------|
-| Phase 1 | 认证模块 (pkg/auth) | 待开始 |
-| Phase 2 | WebSocket 客户端 (pkg/ws) | 待开始 |
-| Phase 3 | API 客户端 (pkg/client) | 待开始 |
-| Phase 4 | 订单管理 (pkg/order) | 待开始 |
-| Phase 5 | 风险管理 (pkg/risk) - 立即平仓策略 | 待开始 |
-| Phase 6 | 做市策略 (pkg/strategy) | 待开始 |
+| Phase 1 | 认证模块 (pkg/auth) | ✅ 已完成 |
+| Phase 2 | WebSocket 客户端 (pkg/ws) | ✅ 已完成 |
+| Phase 3 | API 客户端 (pkg/client) | ✅ 已完成 |
+| Phase 4 | 订单管理 (pkg/order) | ✅ 已完成 |
+| Phase 5 | 风险管理 (pkg/risk) - 立即平仓策略 | ✅ 已完成 |
+| Phase 6 | 做市策略 (pkg/strategy) | ✅ 已完成 |
 | Phase 7 | 在线监控 (pkg/monitor) | 待开始 |
-| Phase 8 | 主程序集成 (cmd/main.go) | 待开始 |
-| Phase 9 | 测试与优化 | 待开始 |
+| Phase 8 | 主程序集成 (cmd/main.go) | ✅ 已完成 |
+| Phase 9 | 测试与优化 | 进行中 |
 
-## TODO 优化项
+**新增模块**:
+- `pkg/timewindow` - 时间窗口控制 (✅ 已完成)
 
-### 1. 时间窗口控制
+## 已完成优化项
 
-**目标**: 避开高波动时间段（如中国时间晚上 10 点到凌晨 1 点）
+### ✅ 1. 时间窗口控制
 
-**实现方案**:
+**状态**: 已完成
+
+**目标**: 避开高波动时间段（如北京时间工作日晚上 10 点到凌晨 3 点，美股开盘时间）
+
+**实现方案**: 已实现 `pkg/timewindow` 模块
+
 ```go
-type TimeWindowFilter struct {
-    TimeZone string  // 时区，如 "Asia/Shanghai"
-    Windows  []TimeWindow  // 禁止运行的时间窗口
+// pkg/timewindow/filter.go
+type Filter struct {
+    cfg    config.TimeWindowConfig
+    loc    *time.Location
 }
 
-type TimeWindow struct {
-    Start string  // "22:00"
-    End   string  // "01:00"  // 支持跨天
-}
+type WindowStatus string
 
-func (f *TimeWindowFilter) ShouldRun(now time.Time) bool {
-    // 检查当前时间是否在禁止窗口内
-    // 如果在窗口内，暂停下单但保持价格更新
-}
+const (
+    StatusInWindow      WindowStatus = "in_window"       // 在窗口期内
+    StatusBeforeWindow  WindowStatus = "before_window"   // 窗口期即将开始
+    StatusOutsideWindow WindowStatus = "outside_window"  // 在窗口期外
+    StatusDisabled      WindowStatus = "disabled"        // 功能未启用
+)
+
+func (f *Filter) ShouldRun() (bool, time.Duration, WindowStatus)
+func (f *Filter) IsInWindow() bool
+func (f *Filter) WaitForWindowEnd() <-chan time.Time
 ```
 
 **集成位置**:
-- `pkg/strategy/marketmaker.go` - 在 `OnPriceUpdate` 中检查
-- 配置文件添加 `time_windows` 配置
+- `pkg/timewindow/filter.go` - 时间窗口过滤器核心逻辑
+- `pkg/config/config.go` - 配置结构体 (`TimeWindowConfig`, `WindowSpec`, `WindowAction`)
+- `pkg/strategy/marketmaker.go` - 运行时监控 (`MonitorTimeWindow` 方法)
+- `configs/config.yaml` - 配置文件
+
+**功能特性**:
+- ✅ 支持跨天时间窗口（如 22:00-03:00）
+- ✅ 支持按星期几配置
+- ✅ 启动时立即检查当前状态
+- ✅ 运行时每 30 秒持续监控
+- ✅ 进入窗口期：暂停做市 → 取消订单 → 平仓
+- ✅ 离开窗口期：自动恢复做市
+
+**配置示例**:
+```yaml
+time_window:
+  enabled: true
+  timezone: "Asia/Shanghai"
+  windows:
+    - start: "22:00"
+      end: "03:00"
+      weekdays: [1,2,3,4,5]  # 周一到周五
+  action: "shutdown"  # 停止运行
+```
 
 ---
+
+## TODO 优化项
 
 ### 2. 波动保护机制
 
@@ -1477,15 +1511,15 @@ position_guard:
 
 ### 优先级建议
 
-| TODO | 优先级 | 预计工作量 | 收益 |
-|------|--------|-----------|------|
-| 1. 时间窗口控制 | 中 | 2-3 小时 | 避开高风险时段 |
-| 2. 波动保护机制 | 高 | 2-3 小时 | 防止异常波动损失 |
-| 3. API 调用优化 | 高 | 1 小时 | 减少 API 调用 50% |
-| 4. 智能撤单策略 | 中 | 3-4 小时 | 降低交易成本 |
-| 5. JWT Token 过期处理 | 高 | 2-3 小时 | 生产环境必需 |
-| 6. 定期平仓检查 | 高 | 2-3 小时 | 风险控制必需 |
-| 7. 吃单后暂停开单 | 高 | 2-3 小时 | 核心风险控制 |
+| TODO | 状态 | 优先级 | 预计工作量 | 收益 |
+|------|------|--------|-----------|------|
+| 1. 时间窗口控制 | ✅ 已完成 | 中 | 2-3 小时 | 避开高风险时段 |
+| 2. 波动保护机制 | 待开始 | 高 | 2-3 小时 | 防止异常波动损失 |
+| 3. API 调用优化 | 待开始 | 高 | 1 小时 | 减少 API 调用 50% |
+| 4. 智能撤单策略 | 待开始 | 中 | 3-4 小时 | 降低交易成本 |
+| 5. JWT Token 过期处理 | 待开始 | 高 | 2-3 小时 | 生产环境必需 |
+| 6. 定期平仓检查 | 待开始 | 高 | 2-3 小时 | 风险控制必需 |
+| 7. 吃单后暂停开单 | 待开始 | 高 | 2-3 小时 | 核心风险控制 |
 
 ## 参考文档
 

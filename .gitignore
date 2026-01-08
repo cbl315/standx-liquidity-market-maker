@@ -33,3 +33,4 @@ go.work.sum
 bin*
 main
 main.log
+standx-liquidity-market-maker

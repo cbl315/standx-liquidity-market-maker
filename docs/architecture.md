@@ -897,37 +897,76 @@ time_window:
 
 ---
 
-## TODO 优化项
+### ✅ 2. 波动保护机制
 
-### 2. 波动保护机制
+**状态**: 已完成
 
-**目标**: 短时间内价格波动超过 50 bps 时暂停做市
+**目标**: 短时间内价格波动超过阈值时暂停做市并平仓
 
-**实现方案**:
+**实现方案**: 已实现 `pkg/volatility` 模块
+
 ```go
-type VolatilityGuard struct {
-    thresholdBPS  int     // 50 bps
-    windowSec     int     // 检测窗口（秒）
-    priceHistory  []PriceSnapshot
+// pkg/volatility/guard.go
+type Guard struct {
+    thresholdBPS int                 // 波动阈值（如 50 bps）
+    windowSec    int                 // 检测窗口（秒）
+    minSnapshots int                 // 最小快照数量
+    snapshots    []PriceSnapshot     // 价格历史快照
+    enabled      bool                // 是否启用
+    isPaused     bool                // 当前是否暂停
+    wasPaused    bool                // 上次状态（用于检测变化）
 }
 
 type PriceSnapshot struct {
-    timestamp time.Time
-    price     float64
+    Timestamp time.Time
+    Price     float64
 }
 
-func (g *VolatilityGuard) ShouldPause(currentPrice float64) bool {
-    // 计算窗口内的价格变化
-    // 如果超过阈值，暂停下单
-    // 返回 true 表示应该暂停
-}
+func (g *Guard) ShouldPause(currentPrice float64) (bool, int, string)
+func (g *Guard) CheckStateChange() (paused, justEntered, justExited bool)
 ```
 
 **集成位置**:
-- `pkg/strategy/marketmaker.go` - 在下单前检查波动率
-- 配置文件添加 `volatility_protection` 配置
+- `pkg/volatility/guard.go` - 波动保护核心逻辑
+- `pkg/strategy/marketmaker.go` - 暂停状态管理 (`PauseState` 枚举)
+- `pkg/config/config.go` - 配置结构体 (`VolatilityConfig`)
+- `configs/config.yaml` - 配置文件
+- `cmd/main.go` - 初始化和启动监控
+
+**功能特性**:
+- ✅ 滑动时间窗口计算波动率
+- ✅ 可配置波动阈值（bps）和检测窗口时长
+- ✅ 最小快照数量保护，避免样本太少误判
+- ✅ 波动率计算：`(max - min) / avg * 10000` bps
+- ✅ 状态变化检测（进入/退出高波动状态）
+- ✅ 进入高波动：暂停 → 取消订单 → 平仓
+- ✅ 退出高波动：自动恢复做市
+- ✅ 暂停优先级：窗口期 > 高波动
+- ✅ 窗口期内跳过波动率监控
+
+**配置示例**:
+```yaml
+volatility:
+  enabled: true              # 是否启用波动保护
+  threshold_bps: 50          # 波动阈值（50 bps = 0.5%）
+  window_sec: 60             # 检测窗口时长（60秒）
+  min_snapshots: 5           # 最小快照数量
+```
+
+**暂停状态管理**:
+```go
+type PauseState int
+
+const (
+    PauseStateNone            PauseState = iota  // 未暂停
+    PauseStateTimeWindow                      // 时间窗口暂停
+    PauseStateHighVolatility                  // 高波动暂停
+)
+```
 
 ---
+
+## TODO 优化项
 
 ### 3. API 调用优化
 
@@ -1514,7 +1553,7 @@ position_guard:
 | TODO | 状态 | 优先级 | 预计工作量 | 收益 |
 |------|------|--------|-----------|------|
 | 1. 时间窗口控制 | ✅ 已完成 | 中 | 2-3 小时 | 避开高风险时段 |
-| 2. 波动保护机制 | 待开始 | 高 | 2-3 小时 | 防止异常波动损失 |
+| 2. 波动保护机制 | ✅ 已完成 | 高 | 2-3 小时 | 防止异常波动损失 |
 | 3. API 调用优化 | 待开始 | 高 | 1 小时 | 减少 API 调用 50% |
 | 4. 智能撤单策略 | 待开始 | 中 | 3-4 小时 | 降低交易成本 |
 | 5. JWT Token 过期处理 | 待开始 | 高 | 2-3 小时 | 生产环境必需 |

@@ -9,14 +9,15 @@ import (
 
 // Config 应用配置
 type Config struct {
-	Chain      string         `mapstructure:"chain"`
-	API        APIConfig      `mapstructure:"api"`
-	Strategy   Strategy       `mapstructure:"strategy"`
-	Risk       RiskConfig     `mapstructure:"risk"`
-	WS         WSConfig       `mapstructure:"websocket"`
-	Monitor    Monitor        `mapstructure:"monitor"`
-	TimeWindow TimeWindowConfig `mapstructure:"time_window"`
-	Log        LogConfig      `mapstructure:"log"`
+	Chain       string            `mapstructure:"chain"`
+	API         APIConfig         `mapstructure:"api"`
+	Strategy    Strategy          `mapstructure:"strategy"`
+	Risk        RiskConfig        `mapstructure:"risk"`
+	WS          WSConfig          `mapstructure:"websocket"`
+	Monitor     Monitor           `mapstructure:"monitor"`
+	TimeWindow  TimeWindowConfig  `mapstructure:"time_window"`
+	Volatility  VolatilityConfig  `mapstructure:"volatility"`
+	Log         LogConfig         `mapstructure:"log"`
 }
 
 // APIConfig API 配置
@@ -59,6 +60,14 @@ type Monitor struct {
 type LogConfig struct {
 	Level  string `mapstructure:"level"`
 	Format string `mapstructure:"format"`
+}
+
+// VolatilityConfig 波动保护配置
+type VolatilityConfig struct {
+	Enabled      bool `mapstructure:"enabled"`       // 是否启用波动保护
+	ThresholdBPS int  `mapstructure:"threshold_bps"` // 波动阈值（基点），如 50 = 0.5%
+	WindowSec    int  `mapstructure:"window_sec"`    // 检测窗口时长（秒）
+	MinSnapshots int  `mapstructure:"min_snapshots"` // 最小快照数量
 }
 
 // TimeWindowConfig 时间窗口配置

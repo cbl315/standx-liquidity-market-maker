@@ -15,6 +15,7 @@ import (
 	"github.com/cbl315/standx-liquidity-market-maker/pkg/risk"
 	"github.com/cbl315/standx-liquidity-market-maker/pkg/strategy"
 	"github.com/cbl315/standx-liquidity-market-maker/pkg/timewindow"
+	"github.com/cbl315/standx-liquidity-market-maker/pkg/volatility"
 	"github.com/cbl315/standx-liquidity-market-maker/pkg/ws"
 )
 
@@ -141,11 +142,26 @@ func main() {
 		},
 	)
 
+	// 创建波动保护器
+	var volGuard *volatility.Guard
+	if cfg.Volatility.Enabled {
+		volGuard = volatility.NewGuard(
+			cfg.Volatility.ThresholdBPS,
+			cfg.Volatility.WindowSec,
+			cfg.Volatility.MinSnapshots,
+		)
+		slog.Info("volatility guard enabled",
+			"threshold_bps", cfg.Volatility.ThresholdBPS,
+			"window_sec", cfg.Volatility.WindowSec,
+			"min_snapshots", cfg.Volatility.MinSnapshots)
+	}
+
 	// 创建做市策略
 	mm := strategy.NewMarketMaker(
 		orderMgr,
 		riskMgr,
 		wsClient,
+		volGuard,
 		cfg.Strategy.Symbol,
 		cfg.Strategy.OrderQty,
 		cfg.Strategy.SpreadBPS,
@@ -158,6 +174,11 @@ func main() {
 	// 启动运行时时间窗口监控（仅当启用且action为shutdown时）
 	if cfg.TimeWindow.Enabled && cfg.TimeWindow.Action == config.WindowActionShutdown {
 		go mm.MonitorTimeWindow(ctx, windowFilter, apiClient, orderMgr)
+	}
+
+	// 启动运行时波动率监控
+	if cfg.Volatility.Enabled {
+		go mm.MonitorVolatility(ctx, apiClient, orderMgr)
 	}
 
 	// 启动做市策略

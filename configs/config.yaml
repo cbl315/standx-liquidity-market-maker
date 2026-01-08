@@ -36,7 +36,7 @@ monitor:
 
 # 时间窗口配置（北京时间）
 time_window:
-  enabled: false              # 是否启用时间窗口控制
+  enabled: true              # 是否启用时间窗口控制
   timezone: "Asia/Shanghai"  # 时区
   windows:                   # 禁止运行的时间窗口
     - start: "10:00"         # 开始时间

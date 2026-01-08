@@ -54,10 +54,10 @@ volatility:
 # 仓位冷却配置（吃单后马上平单，然后进入冷静期）
 position_cooldown:
   enabled: true              # 是否启用仓位监控
-  check_interval: 10s         # 检查间隔
-  cooldown_duration: 30s     # 冷却时长
+  check_interval: 15s         # 检查间隔
+  cooldown_duration: 60s     # 冷却时长
 
 # 日志配置
 log:
   level: info  # debug | info | warn | error
-  format: json # json | text
+  format: text # json | text

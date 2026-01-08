@@ -21,10 +21,10 @@ import (
 type PauseState int
 
 const (
-	PauseStateNone            PauseState = iota // 未暂停
-	PauseStateTimeWindow                        // 时间窗口暂停
-	PauseStateHighVolatility                    // 高波动暂停
-	PauseStatePositionCooldown                  // 仓位冷却暂停
+	PauseStateNone             PauseState = iota // 未暂停
+	PauseStateTimeWindow                         // 时间窗口暂停
+	PauseStateHighVolatility                     // 高波动暂停
+	PauseStatePositionCooldown                   // 仓位冷却暂停
 )
 
 func (s PauseState) String() string {
@@ -59,7 +59,7 @@ type MarketMaker struct {
 	currentBid float64
 	currentAsk float64
 	isRunning  bool
-	pauseState PauseState  // 暂停状态
+	pauseState PauseState // 暂停状态
 }
 
 // NewMarketMaker 创建做市策略
@@ -480,7 +480,8 @@ func (mm *MarketMaker) MonitorPositions(
 
 		case <-ticker.C:
 			// 如果在冷却期，跳过检查
-			if inCooldown {
+			// 如果在时间窗口期，跳过检查（窗口期内不会开新单，无需检查仓位）
+			if inCooldown || mm.GetPauseState() == PauseStateTimeWindow {
 				continue
 			}
 

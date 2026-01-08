@@ -181,6 +181,14 @@ func main() {
 		go mm.MonitorVolatility(ctx, apiClient, orderMgr)
 	}
 
+	// 启动仓位监控（吃单后马上平单，然后进入冷静期）
+	if cfg.PositionCooldown.Enabled {
+		go mm.MonitorPositions(ctx, apiClient, cfg.PositionCooldown.CheckInterval, cfg.PositionCooldown.CooldownDuration)
+		slog.Info("position monitoring enabled",
+			"check_interval", cfg.PositionCooldown.CheckInterval,
+			"cooldown_duration", cfg.PositionCooldown.CooldownDuration)
+	}
+
 	// 启动做市策略
 	go func() {
 		if err := mm.Run(ctx); err != nil {

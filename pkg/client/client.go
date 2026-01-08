@@ -222,6 +222,20 @@ func (c *Client) GetOpenOrdersByStatus(symbol, status string, orderType ...strin
 
 // GetPosition 获取仓位
 func (c *Client) GetPosition(symbol string) (*Position, error) {
+	positions, err := c.QueryPositions(symbol)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(positions) == 0 {
+		return nil, nil
+	}
+
+	return &positions[0], nil
+}
+
+// QueryPositions 获取所有仓位（返回数组）
+func (c *Client) QueryPositions(symbol string) ([]Position, error) {
 	url := fmt.Sprintf("%s/api/query_positions?symbol=%s", c.baseURL, symbol)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -243,7 +257,7 @@ func (c *Client) GetPosition(symbol string) (*Position, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get position failed: %s", string(body))
+		return nil, fmt.Errorf("query positions failed: %s", string(body))
 	}
 
 	var result []Position
@@ -251,11 +265,7 @@ func (c *Client) GetPosition(symbol string) (*Position, error) {
 		return nil, err
 	}
 
-	if len(result) == 0 {
-		return nil, nil
-	}
-
-	return &result[0], nil
+	return result, nil
 }
 
 // GetSymbolPrice 获取 Symbol 价格

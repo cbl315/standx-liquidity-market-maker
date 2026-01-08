@@ -21,9 +21,10 @@ import (
 type PauseState int
 
 const (
-	PauseStateNone      PauseState = iota // 未暂停
-	PauseStateTimeWindow                  // 时间窗口暂停
-	PauseStateHighVolatility              // 高波动暂停
+	PauseStateNone            PauseState = iota // 未暂停
+	PauseStateTimeWindow                        // 时间窗口暂停
+	PauseStateHighVolatility                    // 高波动暂停
+	PauseStatePositionCooldown                  // 仓位冷却暂停
 )
 
 func (s PauseState) String() string {
@@ -34,6 +35,8 @@ func (s PauseState) String() string {
 		return "time_window"
 	case PauseStateHighVolatility:
 		return "high_volatility"
+	case PauseStatePositionCooldown:
+		return "position_cooldown"
 	default:
 		return "unknown"
 	}
@@ -450,4 +453,79 @@ func abs(x float64) float64 {
 		return -x
 	}
 	return x
+}
+
+// MonitorPositions 监控仓位并自动平仓（在独立 goroutine 中运行）
+// 吃单后马上平单，然后进入冷静期暂停开单一段时间
+func (mm *MarketMaker) MonitorPositions(
+	ctx context.Context,
+	apiClient *client.Client,
+	checkInterval time.Duration,
+	cooldownDuration time.Duration,
+) {
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	// 用于跟踪是否在冷却期
+	var cooldownTimer *time.Timer
+	var inCooldown bool
+
+	for {
+		select {
+		case <-ctx.Done():
+			if cooldownTimer != nil {
+				cooldownTimer.Stop()
+			}
+			return
+
+		case <-ticker.C:
+			// 如果在冷却期，跳过检查
+			if inCooldown {
+				continue
+			}
+
+			// 查询仓位
+			positions, err := apiClient.QueryPositions(mm.symbol)
+			if err != nil {
+				slog.Error("query positions failed", "error", err)
+				continue
+			}
+
+			// 检查是否有开放的仓位
+			hasOpenPosition := false
+			for _, pos := range positions {
+				if pos.Status == "open" {
+					size, err := parsePositionSize(pos.Qty)
+					if err != nil {
+						slog.Error("parse position size failed", "error", err)
+						continue
+					}
+					if size != 0 {
+						hasOpenPosition = true
+						break
+					}
+				}
+			}
+
+			if !hasOpenPosition {
+				// 没有开放仓位，继续监控
+				continue
+			}
+
+			// 有开放仓位，调用 Pause 会自动取消所有订单并平仓
+			slog.Warn("open position detected, entering cooldown and closing positions",
+				"symbol", mm.symbol,
+				"cooldown_duration", cooldownDuration)
+
+			mm.Pause(apiClient, PauseStatePositionCooldown)
+			inCooldown = true
+
+			// 设置冷却定时器
+			cooldownTimer = time.AfterFunc(cooldownDuration, func() {
+				slog.Info("position cooldown ended, resuming market making")
+				mm.Resume(PauseStatePositionCooldown)
+				inCooldown = false
+			})
+		}
+	}
 }

@@ -9,15 +9,16 @@ import (
 
 // Config 应用配置
 type Config struct {
-	Chain       string            `mapstructure:"chain"`
-	API         APIConfig         `mapstructure:"api"`
-	Strategy    Strategy          `mapstructure:"strategy"`
-	Risk        RiskConfig        `mapstructure:"risk"`
-	WS          WSConfig          `mapstructure:"websocket"`
-	Monitor     Monitor           `mapstructure:"monitor"`
-	TimeWindow  TimeWindowConfig  `mapstructure:"time_window"`
-	Volatility  VolatilityConfig  `mapstructure:"volatility"`
-	Log         LogConfig         `mapstructure:"log"`
+	Chain            string            `mapstructure:"chain"`
+	API              APIConfig         `mapstructure:"api"`
+	Strategy         Strategy          `mapstructure:"strategy"`
+	Risk             RiskConfig        `mapstructure:"risk"`
+	WS               WSConfig          `mapstructure:"websocket"`
+	Monitor          Monitor           `mapstructure:"monitor"`
+	TimeWindow       TimeWindowConfig  `mapstructure:"time_window"`
+	Volatility       VolatilityConfig  `mapstructure:"volatility"`
+	PositionCooldown PositionCooldown  `mapstructure:"position_cooldown"`
+	Log              LogConfig         `mapstructure:"log"`
 }
 
 // APIConfig API 配置
@@ -92,6 +93,13 @@ const (
 	WindowActionShutdown WindowAction = "shutdown" // 停止运行
 	WindowActionPause    WindowAction = "pause"    // 暂停下单
 )
+
+// PositionCooldown 仓位冷却配置
+type PositionCooldown struct {
+	Enabled         bool          `mapstructure:"enabled"`          // 是否启用仓位监控
+	CheckInterval   time.Duration `mapstructure:"check_interval"`   // 检查间隔
+	CooldownDuration time.Duration `mapstructure:"cooldown_duration"` // 冷却时长
+}
 
 // Load 从文件加载配置
 func Load(configPath string) (*Config, error) {

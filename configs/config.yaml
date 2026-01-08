@@ -36,7 +36,7 @@ monitor:
 
 # 时间窗口配置（北京时间）
 time_window:
-  enabled: true              # 是否启用时间窗口控制
+  enabled: false              # 是否启用时间窗口控制
   timezone: "Asia/Shanghai"  # 时区
   windows:                   # 禁止运行的时间窗口
     - start: "10:00"         # 开始时间
@@ -50,6 +50,12 @@ volatility:
   threshold_bps: 20          # 波动阈值（基点），20 bps = 0.2%
   window_sec: 60             # 检测窗口时长（秒）
   min_snapshots: 5           # 最小快照数量，避免样本太少误判
+
+# 仓位冷却配置（吃单后马上平单，然后进入冷静期）
+position_cooldown:
+  enabled: true              # 是否启用仓位监控
+  check_interval: 10s         # 检查间隔
+  cooldown_duration: 30s     # 冷却时长
 
 # 日志配置
 log:

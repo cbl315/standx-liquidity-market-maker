@@ -961,8 +961,131 @@ const (
     PauseStateNone            PauseState = iota  // 未暂停
     PauseStateTimeWindow                      // 时间窗口暂停
     PauseStateHighVolatility                  // 高波动暂停
+    PauseStatePositionCooldown                // 仓位冷却暂停
 )
 ```
+
+---
+
+### ✅ 3. 仓位监控与自动冷却
+
+**状态**: 已完成
+
+**目标**: 吃单后马上平单，然后进入冷静期暂停开单一段时间
+
+**问题**: 限价单被吃单后会持有仓位，需要及时平仓并避免频繁开单累积风险
+
+**实现方案**: 已实现 `MonitorPositions` 方法（集成在 `pkg/strategy/marketmaker.go`）
+
+```go
+// pkg/strategy/marketmaker.go
+func (mm *MarketMaker) MonitorPositions(
+    ctx context.Context,
+    apiClient *client.Client,
+    checkInterval time.Duration,   // 检查间隔
+    cooldownDuration time.Duration, // 冷却时长
+)
+```
+
+**工作流程**:
+```
+1. 定期通过 GET /api/query_positions 查询当前仓位
+2. 检测到开放仓位（status=open, size!=0）:
+   a. 调用 mm.Pause() → 自动取消所有订单并平仓
+   b. 进入冷却期（不再开新单）
+   c. 冷却期结束后调用 mm.Resume() 恢复做市
+3. 冷却期内跳过仓位检查
+```
+
+**核心逻辑**:
+```go
+func (mm *MarketMaker) MonitorPositions(...) {
+    ticker := time.NewTicker(checkInterval)
+    var cooldownTimer *time.Timer
+    var inCooldown bool
+
+    for {
+        select {
+        case <-ticker.C:
+            if inCooldown {
+                continue  // 冷却期内跳过检查
+            }
+
+            // 查询仓位
+            positions, err := apiClient.QueryPositions(mm.symbol)
+
+            // 检查是否有开放仓位
+            hasOpenPosition := false
+            for _, pos := range positions {
+                if pos.Status == "open" {
+                    size, _ := parsePositionSize(pos.Qty)
+                    if size != 0 {
+                        hasOpenPosition = true
+                        break
+                    }
+                }
+            }
+
+            if hasOpenPosition {
+                // 调用 Pause 会自动取消订单并平仓
+                mm.Pause(apiClient, PauseStatePositionCooldown)
+                inCooldown = true
+
+                // 设置冷却定时器
+                cooldownTimer = time.AfterFunc(cooldownDuration, func() {
+                    mm.Resume(PauseStatePositionCooldown)
+                    inCooldown = false
+                })
+            }
+        }
+    }
+}
+```
+
+**集成位置**:
+- `pkg/client/client.go` - `QueryPositions` API 方法（返回所有仓位数组）
+- `pkg/strategy/marketmaker.go` - `MonitorPositions` 方法
+- `pkg/config/config.go` - `PositionCooldown` 配置结构体
+- `cmd/main.go` - 启动监控 goroutine
+
+**配置示例**:
+```yaml
+position_cooldown:
+  enabled: true              # 是否启用仓位监控
+  check_interval: 10s        # 检查间隔
+  cooldown_duration: 30s     # 冷却时长
+```
+
+**功能特性**:
+- ✅ 定期查询仓位状态（通过 `/api/query_positions` API）
+- ✅ 检测到开放仓位立即调用 `mm.Pause()`（复用现有暂停机制）
+- ✅ `mm.Pause()` 自动处理：取消所有订单 + 平仓
+- ✅ 冷却期内不进行仓位检查
+- ✅ 冷却期结束后自动恢复做市
+- ✅ 使用新的 `PauseStatePositionCooldown` 状态
+
+**API 接口**:
+```
+GET /api/query_positions?symbol=BTC-USD
+
+Response:
+[
+  {
+    "id": 15,
+    "symbol": "BTC-USD",
+    "qty": "0.940",
+    "status": "open",
+    "entry_price": "121737.96",
+    "mark_price": "121715.05",
+    ...
+  }
+]
+```
+
+**关键点**:
+- 复用 `mm.Pause()` 方法，无需重复实现取消订单和平仓逻辑
+- 冷却期避免频繁检查和平仓
+- 使用 `time.AfterFunc` 实现异步恢复
 
 ---
 
@@ -1138,6 +1261,8 @@ func (c *Client) doRequest(method, path string, body []byte, signatures map[stri
 ---
 
 ### 6. 定期平仓检查
+
+> **✅ 已完成**: 此功能已与 TODO 7 合并为 **TODO 3: 仓位监控与自动冷却**（见上文）
 
 **目标**: 定期检查用户的 position（而不是 open order），如果存在 position，则取消所有订单，然后市价平仓，等待重新开单
 
@@ -1415,6 +1540,8 @@ swapped := atomic.CompareAndSwapInt32(&pc.isClosing, 0, 1)
 
 ### 7. 吃单后暂停开单
 
+> **✅ 已完成**: 此功能已与 TODO 6 合并为 **TODO 3: 仓位监控与自动冷却**（见上文）
+
 **目标**: 当限价单被吃单（成交）后，暂停开新的限价单，等待止盈/止损触发或手动平仓后恢复
 
 **问题**: 当前实现在订单成交后会继续开新单，导致仓位累积，增加风险
@@ -1554,11 +1681,10 @@ position_guard:
 |------|------|--------|-----------|------|
 | 1. 时间窗口控制 | ✅ 已完成 | 中 | 2-3 小时 | 避开高风险时段 |
 | 2. 波动保护机制 | ✅ 已完成 | 高 | 2-3 小时 | 防止异常波动损失 |
-| 3. API 调用优化 | 待开始 | 高 | 1 小时 | 减少 API 调用 50% |
-| 4. 智能撤单策略 | 待开始 | 中 | 3-4 小时 | 降低交易成本 |
-| 5. JWT Token 过期处理 | 待开始 | 高 | 2-3 小时 | 生产环境必需 |
-| 6. 定期平仓检查 | 待开始 | 高 | 2-3 小时 | 风险控制必需 |
-| 7. 吃单后暂停开单 | 待开始 | 高 | 2-3 小时 | 核心风险控制 |
+| 3. 仓位监控与冷却 | ✅ 已完成 | 高 | 2-3 小时 | 风险控制必需 |
+| 4. API 调用优化 | 待开始 | 高 | 1 小时 | 减少 API 调用 50% |
+| 5. 智能撤单策略 | 待开始 | 中 | 3-4 小时 | 降低交易成本 |
+| 6. JWT Token 过期处理 | 待开始 | 高 | 2-3 小时 | 生产环境必需 |
 
 ## 参考文档
 

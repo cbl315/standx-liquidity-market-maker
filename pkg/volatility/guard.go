@@ -60,13 +60,44 @@ func (g *Guard) IsPaused() bool {
 	return g.isPaused
 }
 
+// AddPrice 添加价格快照（不触发暂停检查）
+// 用于在暂停状态下继续收集价格数据，以便后续能正确恢复
+func (g *Guard) AddPrice(currentPrice float64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if !g.enabled {
+		return
+	}
+
+	now := time.Now()
+	cutoffTime := now.Add(-time.Duration(g.windowSec) * time.Second)
+
+	// 添加当前价格快照
+	g.snapshots = append(g.snapshots, PriceSnapshot{
+		Timestamp: now,
+		Price:     currentPrice,
+	})
+
+	// 移除窗口外的旧数据
+	newSnapshots := make([]PriceSnapshot, 0, len(g.snapshots))
+	for _, snap := range g.snapshots {
+		if snap.Timestamp.After(cutoffTime) {
+			newSnapshots = append(newSnapshots, snap)
+		}
+	}
+	g.snapshots = newSnapshots
+}
+
 // CheckStateChange 检查暂停状态是否发生变化
 // 返回: (当前是否暂停, 是否刚刚进入暂停状态, 是否刚刚恢复)
 func (g *Guard) CheckStateChange() (paused, justEntered, justExited bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	currentPaused := g.isPaused
+	// 重新计算当前波动率（即使处于暂停状态）
+	currentPaused := g.recalculatePausedState()
+
 	justEntered = currentPaused && !g.wasPaused
 	justExited = !currentPaused && g.wasPaused
 
@@ -74,6 +105,53 @@ func (g *Guard) CheckStateChange() (paused, justEntered, justExited bool) {
 	g.wasPaused = currentPaused
 
 	return currentPaused, justEntered, justExited
+}
+
+// recalculatePausedState 基于当前快照重新计算是否应该暂停
+func (g *Guard) recalculatePausedState() bool {
+	// 样本数量不足，不暂停（也不恢复）
+	if len(g.snapshots) < g.minSnapshots {
+		return g.isPaused // 保持当前状态
+	}
+
+	// 计算当前波动率
+	minPrice := g.snapshots[0].Price
+	maxPrice := g.snapshots[0].Price
+	for _, snap := range g.snapshots {
+		if snap.Price < minPrice {
+			minPrice = snap.Price
+		}
+		if snap.Price > maxPrice {
+			maxPrice = snap.Price
+		}
+	}
+
+	avgPrice := (minPrice + maxPrice) / 2
+	volatilityBPS := int(math.Round((maxPrice-minPrice)/avgPrice * 10000))
+
+	now := time.Now()
+
+	// 检查是否超过阈值
+	if volatilityBPS >= g.thresholdBPS {
+		if !g.isPaused {
+			g.isPaused = true
+			g.pausedAt = now
+			slog.Warn("high volatility detected", "volatility_bps", volatilityBPS)
+		}
+		return true
+	}
+
+	// 波动率低于阈值，检查是否可以恢复
+	if g.isPaused {
+		pausedDuration := now.Sub(g.pausedAt)
+		if pausedDuration > time.Duration(g.windowSec)*time.Second {
+			g.isPaused = false
+			g.pausedAt = time.Time{}
+			slog.Info("volatility normalized", "volatility_bps", volatilityBPS)
+		}
+	}
+
+	return g.isPaused
 }
 
 // ShouldPause 检查是否应该暂停做市

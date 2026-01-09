@@ -114,11 +114,6 @@ func (mm *MarketMaker) Run(ctx context.Context) error {
 
 // OnPriceUpdate 处理价格更新（实现 ws.PriceHandler 接口）
 func (mm *MarketMaker) OnPriceUpdate(data ws.PriceData) {
-	// 检查是否暂停（任何原因）
-	if mm.IsPaused() {
-		return
-	}
-
 	slog.Debug("price update received",
 		"symbol", data.Symbol,
 		"mark_price", data.Data.MarkPrice,
@@ -128,6 +123,17 @@ func (mm *MarketMaker) OnPriceUpdate(data ws.PriceData) {
 	markPrice, err := strconv.ParseFloat(data.Data.MarkPrice, 64)
 	if err != nil {
 		slog.Error("parse mark price failed", "error", err)
+		return
+	}
+
+	// 始终更新波动保护器的价格数据（无论是否暂停）
+	// 这样即使在暂停状态下，也能继续收集价格用于恢复判断
+	if mm.volGuard != nil && mm.volGuard.Enabled() {
+		mm.volGuard.AddPrice(markPrice)
+	}
+
+	// 检查是否暂停（任何原因）
+	if mm.IsPaused() {
 		return
 	}
 

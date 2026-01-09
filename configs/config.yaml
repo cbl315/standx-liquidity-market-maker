@@ -39,9 +39,9 @@ time_window:
   enabled: true              # 是否启用时间窗口控制
   timezone: "Asia/Shanghai"  # 时区
   windows:                   # 禁止运行的时间窗口
-    - start: "10:00"         # 开始时间
+    - start: "22:00"         # 开始时间
       end: "06:00"           # 结束时间（支持跨天）
-      weekdays: [1,2,3,4,5] # 星期一到星期五（1=周一, 7=周日）
+      weekdays: [1,2,3,4] # 星期一到星期五（1=周一, 7=周日）
   action: "shutdown"         # 窗口期内操作: shutdown (停止运行) | pause (暂停下单)
 
 # 波动保护配置

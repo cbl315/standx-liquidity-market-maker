@@ -41,6 +41,11 @@ func NewFilter(cfg config.TimeWindowConfig) (*Filter, error) {
 //   - bool: true 表示可以运行, false 表示在窗口期内
 //   - time.Duration: 距离窗口期开始/结束的剩余时间
 //   - WindowStatus: 当前状态
+//
+// TODO: 跨天窗口 bug - 如果配置 weekdays=[1,2,3,4,5], start=21:00, end=06:00
+//       周五 21:00 开始的窗口会延续到周六 06:00，但周六 02:00 因为 weekday=6 不在
+//       weekdays 配置中，会被判定为不在窗口期。需要修复为：窗口一旦开启，应该持续
+//       到结束时间，不管结束时间是哪一天。
 func (f *Filter) ShouldRun() (bool, time.Duration, WindowStatus) {
 	if !f.cfg.Enabled {
 		return true, 0, StatusDisabled
@@ -80,13 +85,29 @@ func (f *Filter) ShouldRun() (bool, time.Duration, WindowStatus) {
 
 		// 处理跨天情况
 		if endTime.Before(startTime) {
-			// 窗口跨天，例如 22:00 - 03:00
-			if now.Hour() > startTime.Hour() || (now.Hour() == startTime.Hour() && now.Minute() >= startTime.Minute()) {
-				// 当前时间在开始时间之后（当天），窗口结束时间是第二天
-				windowEnd = windowEnd.Add(24 * time.Hour)
+			// 窗口跨天，例如 21:00 - 06:00
+			nowMinutes := now.Hour()*60 + now.Minute()
+			endMinutes := endTime.Hour()*60 + endTime.Minute()
+
+			if nowMinutes < endMinutes {
+				// 当前时间在结束时间之前（如周二 02:00 < 06:00）
+				// 需要判断是延续前一天的窗口，还是等今天的开始时间
+				prevWeekday := weekday - 1
+				if prevWeekday == 0 {
+					prevWeekday = 7
+				}
+
+				if f.inWeekdays(prevWeekday, window.Weekdays) {
+					// 前一天配置了，延续前一天的窗口
+					windowStart = windowStart.Add(-24 * time.Hour)
+				} else {
+					// 前一天没配置，等今天的开始时间
+					windowStart = windowStart.Add(24 * time.Hour)
+					windowEnd = windowEnd.Add(24 * time.Hour)
+				}
 			} else {
-				// 当前时间在结束时间之前（第二天），窗口开始时间是前一天
-				windowStart = windowStart.Add(-24 * time.Hour)
+				// 当前时间在开始时间之后（如周一 22:00 > 21:00），正常跨天
+				windowEnd = windowEnd.Add(24 * time.Hour)
 			}
 		}
 
@@ -135,10 +156,23 @@ func (f *Filter) GetNextWindowEnd() time.Time {
 		windowEnd := time.Date(now.Year(), now.Month(), now.Day(), endTime.Hour(), endTime.Minute(), 0, 0, f.loc)
 
 		if endTime.Before(startTime) {
-			if now.Hour() > startTime.Hour() || (now.Hour() == startTime.Hour() && now.Minute() >= startTime.Minute()) {
-				windowEnd = windowEnd.Add(24 * time.Hour)
+			nowMinutes := now.Hour()*60 + now.Minute()
+			endMinutes := endTime.Hour()*60 + endTime.Minute()
+
+			if nowMinutes < endMinutes {
+				prevWeekday := weekday - 1
+				if prevWeekday == 0 {
+					prevWeekday = 7
+				}
+
+				if f.inWeekdays(prevWeekday, window.Weekdays) {
+					windowStart = windowStart.Add(-24 * time.Hour)
+				} else {
+					windowStart = windowStart.Add(24 * time.Hour)
+					windowEnd = windowEnd.Add(24 * time.Hour)
+				}
 			} else {
-				windowStart = windowStart.Add(-24 * time.Hour)
+				windowEnd = windowEnd.Add(24 * time.Hour)
 			}
 		}
 

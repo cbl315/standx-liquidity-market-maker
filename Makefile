@@ -1,7 +1,7 @@
 .PHONY: start stop build build-for-linux start-for-linux stop-for-linux stop-all stop-all-for-linux
 
 # 构建并后台运行
-start: build
+start: stop build
 	@echo "Starting standx-liquidity-market-maker..."
 	@bash -c 'set -a && source .env && set +a && nohup ./standx-liquidity-market-maker > main.log 2>&1 & echo $$! > main.pid'
 	@echo "Started. PID: $$(cat main.pid)"
@@ -30,7 +30,7 @@ build-for-linux:
 	@echo "Built binary: standx-liquidity-market-maker-linux"
 
 # 启动 Linux 版本
-start-for-linux:
+start-for-linux: stop-for-linux
 	@echo "Starting standx-liquidity-market-maker-linux..."
 	@bash -c 'set -a && source .env && set +a && nohup ./standx-liquidity-market-maker-linux > main.log 2>&1 & echo $$! > main-linux.pid'
 	@echo "Started. PID: $$(cat main-linux.pid)"

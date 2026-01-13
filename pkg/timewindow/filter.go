@@ -42,30 +42,26 @@ func NewFilter(cfg config.TimeWindowConfig) (*Filter, error) {
 //   - time.Duration: 距离窗口期开始/结束的剩余时间
 //   - WindowStatus: 当前状态
 //
-// TODO: 跨天窗口 bug - 如果配置 weekdays=[1,2,3,4,5], start=21:00, end=06:00
-//       周五 21:00 开始的窗口会延续到周六 06:00，但周六 02:00 因为 weekday=6 不在
-//       weekdays 配置中，会被判定为不在窗口期。需要修复为：窗口一旦开启，应该持续
-//       到结束时间，不管结束时间是哪一天。
+// 跨天窗口处理逻辑：
+// 使用"周内总分钟数"方法统一处理跨天情况。
+// 例如：weekdays=[1,2,3,4,5], start=21:00, end=06:00
+// - 周五 21:00 开启的窗口会持续到周六 06:00，不管周六是否在 weekdays 中
+// - 窗口由其开始时间对应的 weekday 决定是否生效，而不是结束时间
 func (f *Filter) ShouldRun() (bool, time.Duration, WindowStatus) {
 	if !f.cfg.Enabled {
 		return true, 0, StatusDisabled
 	}
 
 	now := time.Now().In(f.loc)
-	weekday := int(now.Weekday()) // Sunday=0, Monday=1, ..., Saturday=6
+	nowWeekday := int(now.Weekday()) // Sunday=0, Monday=1, ..., Saturday=6
 
 	// 转换为配置格式 (Monday=1, ..., Sunday=7)
-	if weekday == 0 {
-		weekday = 7
+	if nowWeekday == 0 {
+		nowWeekday = 7
 	}
 
 	// 检查每个时间窗口
 	for _, window := range f.cfg.Windows {
-		// 检查是否在指定的星期几
-		if !f.inWeekdays(weekday, window.Weekdays) {
-			continue
-		}
-
 		// 解析时间
 		startTime, err := time.Parse("15:04", window.Start)
 		if err != nil {
@@ -79,55 +75,66 @@ func (f *Filter) ShouldRun() (bool, time.Duration, WindowStatus) {
 			continue
 		}
 
-		// 构建今天的开始和结束时间
-		windowStart := time.Date(now.Year(), now.Month(), now.Day(), startTime.Hour(), startTime.Minute(), 0, 0, f.loc)
-		windowEnd := time.Date(now.Year(), now.Month(), now.Day(), endTime.Hour(), endTime.Minute(), 0, 0, f.loc)
+		// 计算周内分钟数 (周一 00:00 = 0, 周日 23:59 = 10079)
+		startMinutes := f.toWeekMinutes(startTime.Hour(), startTime.Minute(), 1) // 默认周一
+		endMinutes := f.toWeekMinutes(endTime.Hour(), endTime.Minute(), 1)       // 默认周一
 
-		// 处理跨天情况
-		if endTime.Before(startTime) {
-			// 窗口跨天，例如 21:00 - 06:00
-			nowMinutes := now.Hour()*60 + now.Minute()
-			endMinutes := endTime.Hour()*60 + endTime.Minute()
+		// 处理跨天：如果结束时间小于开始时间，说明跨天
+		if endMinutes <= startMinutes {
+			endMinutes += 10080 // 加一周的分钟数
+		}
 
-			if nowMinutes < endMinutes {
-				// 当前时间在结束时间之前（如周二 02:00 < 06:00）
-				// 需要判断是延续前一天的窗口，还是等今天的开始时间
-				prevWeekday := weekday - 1
-				if prevWeekday == 0 {
-					prevWeekday = 7
-				}
-
-				if f.inWeekdays(prevWeekday, window.Weekdays) {
-					// 前一天配置了，延续前一天的窗口
-					windowStart = windowStart.Add(-24 * time.Hour)
-				} else {
-					// 前一天没配置，等今天的开始时间
-					windowStart = windowStart.Add(24 * time.Hour)
-					windowEnd = windowEnd.Add(24 * time.Hour)
-				}
-			} else {
-				// 当前时间在开始时间之后（如周一 22:00 > 21:00），正常跨天
-				windowEnd = windowEnd.Add(24 * time.Hour)
+		// 检查每个可能的开始日期（窗口可能在今天、昨天或前天开启）
+		// 最多检查前3天，因为窗口最长跨2天
+		for dayOffset := 0; dayOffset <= 2; dayOffset++ {
+			windowWeekday := nowWeekday - dayOffset
+			if windowWeekday <= 0 {
+				windowWeekday += 7
 			}
-		}
 
-		// 检查是否在窗口内
-		if now.After(windowStart) && now.Before(windowEnd) {
-			// 在窗口期内
-			remaining := windowEnd.Sub(now)
-			return false, remaining, StatusInWindow
-		}
+			// 检查窗口开始日是否在 weekdays 配置中
+			if !f.inWeekdays(windowWeekday, window.Weekdays) {
+				continue
+			}
 
-		// 检查是否在窗口期之前（即将进入窗口期）
-		if now.Before(windowStart) {
-			remaining := windowStart.Sub(now)
-			if remaining < 24*time.Hour {
-				return false, remaining, StatusBeforeWindow
+			// 计算这个窗口开始日对应的分钟数
+			windowStartMinutes := f.toWeekMinutes(startTime.Hour(), startTime.Minute(), windowWeekday)
+			windowEndMinutes := windowStartMinutes + (endMinutes - startMinutes)
+
+			nowMinutes := f.toWeekMinutes(now.Hour(), now.Minute(), nowWeekday)
+
+			// 如果当前时间在窗口开始之前，可能需要加一周的分钟数
+			// 这样可以正确处理跨周的情况（虽然不太可能发生）
+			for nowMinutes < windowStartMinutes && dayOffset > 0 {
+				nowMinutes += 10080
+			}
+
+			// 检查是否在窗口内
+			if nowMinutes >= windowStartMinutes && nowMinutes < windowEndMinutes {
+				remaining := windowEndMinutes - nowMinutes
+				return false, time.Duration(remaining) * time.Minute, StatusInWindow
+			}
+
+			// 检查是否即将进入窗口期
+			if nowMinutes < windowStartMinutes {
+				remaining := windowStartMinutes - nowMinutes
+				if remaining < 24*60 && dayOffset == 0 {
+					// 只有今天即将开始的窗口才返回 before_window
+					return false, time.Duration(remaining) * time.Minute, StatusBeforeWindow
+				}
 			}
 		}
 	}
 
 	return true, 0, StatusOutsideWindow
+}
+
+// toWeekMinutes 将 (hour, minute, weekday) 转换为周内总分钟数
+// weekday: 1=周一, 2=周二, ..., 7=周日
+// 返回值: 周一 00:00 = 0, 周日 23:59 = 10079
+func (f *Filter) toWeekMinutes(hour, minute, weekday int) int {
+	// weekday=1 是周一，所以偏移量是 weekday-1
+	return (weekday-1)*1440 + hour*60 + minute
 }
 
 // IsInWindow 判断当前时间是否在窗口期内
@@ -139,45 +146,56 @@ func (f *Filter) IsInWindow() bool {
 // GetNextWindowEnd 获取下一个窗口期结束时间
 func (f *Filter) GetNextWindowEnd() time.Time {
 	now := time.Now().In(f.loc)
-	weekday := int(now.Weekday())
-	if weekday == 0 {
-		weekday = 7
+	nowWeekday := int(now.Weekday())
+	if nowWeekday == 0 {
+		nowWeekday = 7
 	}
 
 	for _, window := range f.cfg.Windows {
-		if !f.inWeekdays(weekday, window.Weekdays) {
-			continue
-		}
-
 		startTime, _ := time.Parse("15:04", window.Start)
 		endTime, _ := time.Parse("15:04", window.End)
 
-		windowStart := time.Date(now.Year(), now.Month(), now.Day(), startTime.Hour(), startTime.Minute(), 0, 0, f.loc)
-		windowEnd := time.Date(now.Year(), now.Month(), now.Day(), endTime.Hour(), endTime.Minute(), 0, 0, f.loc)
+		// 计算周内分钟数
+		startMinutes := f.toWeekMinutes(startTime.Hour(), startTime.Minute(), 1)
+		endMinutes := f.toWeekMinutes(endTime.Hour(), endTime.Minute(), 1)
 
-		if endTime.Before(startTime) {
-			nowMinutes := now.Hour()*60 + now.Minute()
-			endMinutes := endTime.Hour()*60 + endTime.Minute()
-
-			if nowMinutes < endMinutes {
-				prevWeekday := weekday - 1
-				if prevWeekday == 0 {
-					prevWeekday = 7
-				}
-
-				if f.inWeekdays(prevWeekday, window.Weekdays) {
-					windowStart = windowStart.Add(-24 * time.Hour)
-				} else {
-					windowStart = windowStart.Add(24 * time.Hour)
-					windowEnd = windowEnd.Add(24 * time.Hour)
-				}
-			} else {
-				windowEnd = windowEnd.Add(24 * time.Hour)
-			}
+		// 处理跨天
+		if endMinutes <= startMinutes {
+			endMinutes += 10080
 		}
 
-		if now.After(windowStart) && now.Before(windowEnd) {
-			return windowEnd
+		// 检查每个可能的开始日期
+		for dayOffset := 0; dayOffset <= 2; dayOffset++ {
+			windowWeekday := nowWeekday - dayOffset
+			if windowWeekday <= 0 {
+				windowWeekday += 7
+			}
+
+			if !f.inWeekdays(windowWeekday, window.Weekdays) {
+				continue
+			}
+
+			windowStartMinutes := f.toWeekMinutes(startTime.Hour(), startTime.Minute(), windowWeekday)
+			windowEndMinutes := windowStartMinutes + (endMinutes - startMinutes)
+
+			nowMinutes := f.toWeekMinutes(now.Hour(), now.Minute(), nowWeekday)
+
+			for nowMinutes < windowStartMinutes && dayOffset > 0 {
+				nowMinutes += 10080
+			}
+
+			if nowMinutes >= windowStartMinutes && nowMinutes < windowEndMinutes {
+				// 计算结束时间的具体日期时间
+				windowDuration := windowEndMinutes - windowStartMinutes
+				windowStart := time.Date(now.Year(), now.Month(), now.Day(), startTime.Hour(), startTime.Minute(), 0, 0, f.loc)
+
+				// 调整到正确的开始日期
+				if dayOffset > 0 {
+					windowStart = windowStart.AddDate(0, 0, -dayOffset)
+				}
+
+				return windowStart.Add(time.Duration(windowDuration) * time.Minute)
+			}
 		}
 	}
 

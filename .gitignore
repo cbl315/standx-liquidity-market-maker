@@ -36,3 +36,5 @@ main.log
 standx-liquidity-market-maker
 standx-liquidity-market-maker-linux
 logs*
+main.pid
+main-linux.pid
